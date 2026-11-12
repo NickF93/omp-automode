@@ -22,15 +22,17 @@ or process steps the owner has not requested.
 
 ## Workflow
 
-- Use the installed `governed-git-flow` CLI and its skill for supported Git and
-  GitHub operations. Inspect command help rather than guessing arguments.
+- Where the `governed-git-flow` CLI is installed, use it for supported Git and
+  GitHub operations and inspect its command help rather than guessing
+  arguments. Otherwise use native Git and the GitHub CLI following
+  [CONTRIBUTING.md](CONTRIBUTING.md); the rules below apply either way.
 - Inspect origin, branch, identity and local changes first. Preserve unrelated
   work.
 - Work starts from an assigned Issue on `feature/<issue>-<name>` or
   `bugfix/<issue>-<name>` from `develop`. Never commit or push directly to
   `main` or `develop`; verified fast-forward synchronization is allowed.
-- Stage exact paths, review the staged diff and index tree, and commit with the
-  expected-tree guard. Messages use English `type(scope): description`.
+- Stage exact paths, review the staged diff, and commit only what was
+  reviewed. Messages use English `type(scope): description`.
 - Commits and GitHub content carry human attribution only; no AI, agent, model
   or tool creation credit.
 - Push non-force; open an assigned, Issue-linked PR to `develop`.
