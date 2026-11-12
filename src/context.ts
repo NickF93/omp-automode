@@ -265,7 +265,7 @@ function collect(branch: readonly RawEntry[], options: CaptureOptions): Collecte
 			const data = entry.data;
 			if (data.kind === "plan_adoption" && typeof data.path === "string" && typeof data.content === "string") {
 				trusted.push({
-					source: "plan the user approved for implementation in native plan review (written by the agent; text as submitted for review, the user may have edited it before approving; authority limited to its scope)",
+					source: `plan the user approved for implementation in native plan review (written by the agent; ${data.fromFile === true ? "plan file as approved" : "text as submitted for review; edits made during review are not shown"}; authority limited to its scope)`,
 					text: `${data.path}\n${data.content}`,
 				});
 			} else if (data.kind === "result" && isRecord(data.action)) {
@@ -351,6 +351,8 @@ export interface RenderOptions {
 	imageInput: boolean;
 	/** Allow the last recovery step (shortening older trusted instructions); callers with other recovery left disable it. */
 	shortenTrusted?: boolean;
+	/** Lower ceiling after the server rejected a request the local estimate admitted. */
+	ceilingTokens?: number;
 	/** Completed investigation steps dropped from the private history to fit. */
 	omittedSteps?: number;
 }
@@ -457,7 +459,7 @@ export function admit(
 	options: RenderOptions,
 	privateHistoryTokens = 0,
 ): Admission {
-	const ceiling = contextCeiling(model);
+	const ceiling = Math.min(contextCeiling(model), options.ceilingTokens ?? Number.POSITIVE_INFINITY);
 	const evidence: AdmittedEvidence = {
 		trusted: snapshot.trusted.map(t => ({ ...t })),
 		transcript: [...snapshot.transcript],

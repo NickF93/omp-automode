@@ -164,6 +164,8 @@ async function runAttempt(
 		const groups: Message[][] = [];
 		let omittedSteps = 0;
 		let needRestart = false;
+		/** Set once when the server rejects a request the local estimate admitted. */
+		let ceilingTokens: number | undefined;
 		try {
 			for (;;) {
 				// Admit evidence against the cost of the private history. Optional evidence goes
@@ -176,7 +178,7 @@ async function runAttempt(
 						systemPrompt,
 						INVESTIGATION_TOOLS,
 						req.model,
-						{ imageInput, retryReason, omittedSteps, shortenTrusted },
+						{ imageInput, retryReason, omittedSteps, shortenTrusted, ceilingTokens },
 						historyTokens(groups),
 					);
 				let admission = tryAdmit(false);
@@ -239,6 +241,11 @@ async function runAttempt(
 						continue;
 					}
 					if (groups.length === 0) {
+						// The local estimate was too optimistic: recover evidence once against a lower ceiling.
+						if (ceilingTokens === undefined && admission.ok) {
+							ceilingTokens = Math.floor(admission.tokens * 0.75);
+							continue;
+						}
 						return { kind: "input_budget", detail: "the reviewer request exceeds the model's context window" };
 					}
 					needRestart = true;

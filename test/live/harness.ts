@@ -3,7 +3,7 @@
 // The child reaches credentials only through the temporary loopback broker,
 // with the bearer read by a native `!cat` reference; no secret is passed in
 // argv or environment, and evidence is scanned in memory before it is written.
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import { type RpcAgentProcess, RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 
@@ -85,6 +85,11 @@ export class Case {
 				path.join(plugins, "omp-plugins.lock.json"),
 				JSON.stringify({ plugins: {}, settings: { "omp-automode": this.opts.plugin } }, null, 2),
 			);
+		}
+		// A repository root at the case's working directory bounds native project discovery
+		// (context files, skills, rules) so the surrounding checkout cannot leak into the case.
+		if (!existsSync(path.join(this.work, ".git"))) {
+			Bun.spawnSync(["git", "init", "-q", this.work]);
 		}
 		const env: Record<string, string> = {
 			PATH: process.env.PATH ?? "/usr/bin:/bin",

@@ -87,6 +87,8 @@ export interface PlanAdoptionEntry {
 	kind: "plan_adoption";
 	path: string;
 	content: string;
+	/** True when `content` is the plan file read at approval, false when only the submitted snapshot was available. */
+	fromFile: boolean;
 }
 
 export type PersistedEntry = ResultEntry | SelectionEntry | ApprovalEntry | ConsumedEntry | PlanAdoptionEntry;
@@ -255,8 +257,8 @@ export class SessionState {
 		this.selection = selection && (selection.model || selection.effort) ? selection : undefined;
 	}
 
-	recordPlanAdoption(path: string, content: string): void {
-		this.#append(ENTRY_TYPE, { v: 1, kind: "plan_adoption", path, content });
+	recordPlanAdoption(path: string, content: string, fromFile: boolean): void {
+		this.#append(ENTRY_TYPE, { v: 1, kind: "plan_adoption", path, content, fromFile });
 	}
 
 	recordResult(entry: ResultEntry): void {

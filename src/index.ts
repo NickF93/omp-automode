@@ -80,6 +80,24 @@ function canDriveBrowser(tool: string): boolean {
 	return tool === "computer" || tool === "browser" || tool === "eval" || tool === "debug";
 }
 
+/** Read a plan file named by plan review: `local://` resolves under the session's artifacts directory. */
+async function readPlanFile(planPath: string, ctx: ExtensionContext): Promise<string | undefined> {
+	let file: string | undefined;
+	if (planPath.startsWith("local://")) {
+		const artifacts = ctx.sessionManager.getArtifactsDir();
+		const rel = decodeURIComponent(planPath.slice("local://".length));
+		if (artifacts && rel && !rel.split("/").includes("..")) file = path.join(artifacts, "local", rel);
+	} else if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(planPath)) {
+		file = path.resolve(ctx.cwd, planPath);
+	}
+	if (!file) return undefined;
+	try {
+		return await Bun.file(file).text();
+	} catch {
+		return undefined;
+	}
+}
+
 function modelLookup(ctx: ExtensionContext, pi: ExtensionAPI): ModelLookup {
 	return {
 		resolve: spec => ctx.models.resolve(spec),
@@ -202,14 +220,16 @@ export default function automode(pi: ExtensionAPI): void {
 	pi.on("plan_review_requested", event => {
 		pendingPlans.set(event.reviewId, { path: event.planFilePath, content: event.planContent });
 	});
-	pi.on("plan_review_resolved", event => {
+	pi.on("plan_review_resolved", async (event, ctx) => {
 		const plan = pendingPlans.get(event.reviewId);
 		pendingPlans.delete(event.reviewId);
 		if (!plan || event.by !== "local") return;
 		if (event.choice !== "execute" && event.choice !== "keep" && event.choice !== "compact") return;
+		// The approval executes the plan file as it is when picked, which can differ from the
+		// requested snapshot after in-review edits: prefer the file's content now.
+		const approved = await readPlanFile(plan.path, ctx);
 		try {
-			// The user may edit the plan inside the review before approving; this is the submitted text.
-			state.recordPlanAdoption(plan.path, plan.content);
+			state.recordPlanAdoption(plan.path, approved ?? plan.content, approved !== undefined);
 		} catch {
 			// Not persisted: the plan simply carries no adoption evidence.
 		}

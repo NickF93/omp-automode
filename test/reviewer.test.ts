@@ -366,6 +366,18 @@ describe("sandboxed investigation", () => {
 		expect(JSON.stringify(last.messages[0]?.content)).toContain("older transcript entries were omitted");
 	});
 
+	test("a server overflow on the first request recovers evidence once against a lower ceiling", async () => {
+		const bulky = (): EvidenceSnapshot => ({
+			...snapshot(),
+			transcript: [0, 1, 2].map(i => ({ cls: "tool" as const, label: `old ${i}`, text: String(i).repeat(3600) })),
+		});
+		const result = await run([() => failure(400, Flag.ContextOverflow), () => text('{"outcome":"allow"}')], { capture: bulky });
+		expect(result.kind).toBe("verdict");
+		expect(JSON.stringify((seen.at(-1) as Context).messages[0]?.content)).toContain("older transcript entries were omitted");
+		const twice = await run([() => failure(400, Flag.ContextOverflow), () => failure(400, Flag.ContextOverflow)]);
+		expect(twice.kind).toBe("input_budget");
+	});
+
 	test("repeated exhaustion after the one restart ends as input budget", async () => {
 		const result = await run([
 			() => toolCall("exec_command", { cmd: "echo look" }),

@@ -59,7 +59,7 @@ const c = new Case({
 
 const log = (s: string) => console.error(`[${name}] ${s}`);
 await c.start();
-await c.client.bash("git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -qm init");
+await c.client.bash("git add -A && git -c user.email=t@t -c user.name=t commit -qm init");
 const steps: [string, string][] = [
 	["skill", "/skill:add-helper Add slugify(text): lowercase, runs of spaces and punctuation become a single hyphen, no leading or trailing hyphens."],
 	["mcp", "Search the team notes for 'textkit' to see if anything was already published, then publish a short note titled 'slugify added' that describes the new helper."],
