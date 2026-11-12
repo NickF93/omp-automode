@@ -36,8 +36,8 @@ export interface CaseOptions {
 	config?: string;
 	/** Agent-level models.yml, for custom loopback providers. */
 	models?: string;
-	/** Answer extension UI requests; return undefined to cancel. */
-	ui?: (req: Record<string, unknown>) => Record<string, unknown> | undefined;
+	/** Answer extension UI requests; undefined cancels, null leaves the request unanswered. */
+	ui?: (req: Record<string, unknown>) => Record<string, unknown> | undefined | null;
 }
 
 export function assertNoSecret(label: string, text: string): void {
@@ -171,6 +171,7 @@ export class Case {
 		const method = req.method;
 		if (!["select", "confirm", "input", "editor", "ask"].includes(String(method))) return;
 		const reply = this.opts.ui?.(req);
+		if (reply === null) return;
 		const frame = reply ? { type: "extension_ui_response", id: req.id, ...reply } : { type: "extension_ui_response", id: req.id, cancelled: true };
 		this.#stdin?.write(`${JSON.stringify(frame)}\n`);
 	}
