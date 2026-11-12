@@ -1,0 +1,31 @@
+{
+	"name": "omp-automode",
+	"version": "0.1.0",
+	"description": "OMP plugin: an independent AI reviewer allows or blocks each risky tool call before it runs.",
+	"license": "MIT",
+	"type": "module",
+	"keywords": ["omp-plugin", "oh-my-pi", "auto-review"],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/NickF93/omp-automode.git"
+	},
+	"files": ["src", "README.md", "LICENSE"],
+	"engines": {
+		"bun": ">=1.4.4"
+	},
+	"omp": {
+		"extensions": ["./src/index.ts"]
+	},
+	"scripts": {
+		"test": "bun test test",
+		"check": "tsc --noEmit"
+	},
+	"peerDependencies": {
+		"@oh-my-pi/pi-ai": "18.19.0",
+		"@oh-my-pi/pi-coding-agent": "18.19.0"
+	},
+	"devDependencies": {
+		"@types/bun": "1.3.14",
+		"typescript": "5.9.3"
+	}
+}
