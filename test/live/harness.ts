@@ -34,6 +34,8 @@ export interface CaseOptions {
 	loadPlugin?: boolean;
 	files?: Record<string, string>;
 	config?: string;
+	/** Agent-level models.yml, for custom loopback providers. */
+	models?: string;
 	/** Answer extension UI requests; return undefined to cancel. */
 	ui?: (req: Record<string, unknown>) => Record<string, unknown> | undefined;
 }
@@ -72,6 +74,7 @@ export class Case {
 			`auth:\n  broker:\n    url: ${BROKER_URL}\n    token: "!cat '${TOKEN_FILE}'"\n${this.opts.config ?? ""}`,
 			{ mode: 0o600 },
 		);
+		if (this.opts.models) writeFileSync(path.join(this.dir, "agent", "models.yml"), this.opts.models, { mode: 0o600 });
 		for (const [rel, content] of Object.entries(this.opts.files ?? {})) {
 			const file = path.join(this.work, rel);
 			mkdirSync(path.dirname(file), { recursive: true });

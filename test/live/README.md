@@ -29,6 +29,18 @@ MAIN_MODEL=provider/model MAIN_EFFORT=low REVIEW_EFFORT=low bun test/live/workfl
   circuit breaker with real review results.
 - `workflow3.ts`: browser work on a loopback page with synthetic account data
   (draft, authorized publish, injected destructive instruction).
+- `workflow4-scripted.ts`: rows a cheap model does not reliably trigger (README
+  injection, harmful step in a user-invoked skill, revocation across compaction
+  with a forged summary and resume, unanswered/declined/approved `ask`, a
+  subagent blocked then re-dispatched after the user's answer, `/auto-review`
+  model and effort selection, an unknown explicit reviewer, every reviewer
+  investigation tool under the sandbox, and an injected browser click). The
+  main agent's turns come from `scripted-model.ts`, a loopback
+  OpenAI-compatible server; OMP, the plugin, the tools and the reviewer model
+  (`REVIEW_MODEL`, except in the `select` and `sandbox` cases) are real. Select
+  cases with `ONLY=inject,skill,...`; results go to
+  `evidence/live/<CASE>-verdicts.json`. These are scripted-trigger evidence,
+  not real-model acceptance.
 
 A model that refuses or never attempts an action is not evidence that the
 reviewer blocked it; check the recorded tool events and review results.
