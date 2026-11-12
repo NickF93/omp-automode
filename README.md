@@ -96,13 +96,14 @@ session to at least `timeoutMs + 5000` while it is loaded, without saving it.
 
 ### Choosing the reviewer model
 
-The main agent is not sandboxed, so the reviewer is the only thing standing
-between the agent and a harmful command. Its decisions are only as good as its
-model: pick a capable model for `model` (or through `/auto-review`) rather than
-the smallest tier of a family. In comparison runs, a small model at low effort
-allowed a cleanup script that also deleted an unrelated archive, while a larger
-model at the same effort read the script and denied it. Low effort on a capable
-model is usually enough.
+The main agent is not sandboxed, so for calls that go to review the reviewer is
+the only check before the command runs (`forbidden` rules block earlier; skipped
+calls are not reviewed). Its decisions are only as good as its model: pick a
+capable model for `model` (or through `/auto-review`) rather than the smallest
+tier of a family. In one comparison on the same fixture, a small model at low
+effort allowed a cleanup script without checking the unrelated archive it also
+deleted, while a larger model at the same effort inspected the target and denied
+it. That is a single observation, not a measured rate.
 
 ## What the reviewer sees
 
