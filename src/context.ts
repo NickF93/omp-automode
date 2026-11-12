@@ -110,8 +110,6 @@ export interface CaptureOptions {
 	agentsContext?: string;
 	/** Trusted context inherited from the root session (children only). */
 	inherited: TrustedInstruction[];
-	/** Plans the user adopted through native plan review. */
-	adoptedPlans: TrustedInstruction[];
 	/** Explicit plugin-dialog approvals applying to this review. */
 	approvals: TrustedInstruction[];
 }
@@ -145,8 +143,10 @@ function collect(branch: readonly RawEntry[], options: CaptureOptions): Collecte
 	const nonUser: TranscriptEntry[] = [];
 	const priorReviews: string[] = [];
 	const askQuestions = new Map<string, string>();
+	/** Tool calls by id, so each result joins its call in one entry that is kept or evicted together. */
+	const callEntries = new Map<string, TranscriptEntry>();
 	const pushTool = (label: string, text: string) => {
-		if (text.trim()) nonUser.push({ cls: "tool", label, text: truncateMiddle(text, TOOL_ENTRY_MAX_TOKENS * BYTES_PER_TOKEN) });
+		if (text.trim()) nonUser.push({ cls: "tool", label, text });
 	};
 	const pushImages = (label: string, images: ImageContent[]) => {
 		for (const image of images) nonUser.push({ cls: "image", label, text: `[image ${image.mimeType}]`, image });
@@ -168,9 +168,15 @@ function collect(branch: readonly RawEntry[], options: CaptureOptions): Collecte
 					}
 					break;
 				}
-				case "developer":
-					if (msg.attribution !== "agent" && text.trim()) trusted.push({ source: "developer instruction", text });
+				case "developer": {
+					// Synthetic developer prompts are harness or extension injections unless a human started them.
+					const human =
+						!options.isChild && msg.attribution !== "agent" && (msg.synthetic !== true || msg.userInitiated === true);
+					if (!text.trim()) break;
+					if (human) trusted.push({ source: "developer instruction", text });
+					else nonUser.push({ cls: "commentary", label: "injected developer-role message (untrusted)", text: truncateMiddle(text, ASSISTANT_ENTRY_MAX_TOKENS * BYTES_PER_TOKEN) });
 					break;
+				}
 				case "assistant": {
 					if (!Array.isArray(msg.content)) break;
 					const texts: string[] = [];
@@ -182,7 +188,13 @@ function collect(branch: readonly RawEntry[], options: CaptureOptions): Collecte
 							if (part.name === "ask" && typeof part.id === "string" && typeof args.html === "string") {
 								askQuestions.set(part.id, args.html);
 							}
-							pushTool(`assistant tool call ${part.name} (untrusted)`, JSON.stringify(args));
+							const entry: TranscriptEntry = {
+								cls: "tool",
+								label: `tool call ${part.name}${typeof part.id === "string" ? ` [${part.id}]` : ""} (untrusted)`,
+								text: JSON.stringify(args),
+							};
+							nonUser.push(entry);
+							if (typeof part.id === "string") callEntries.set(part.id, entry);
 						}
 					}
 					const said = texts.join("\n");
@@ -202,12 +214,20 @@ function collect(branch: readonly RawEntry[], options: CaptureOptions): Collecte
 						name === "ask" && msg.isError !== true && details.timedOut !== true && Array.isArray(details.answers);
 					if (explicitAnswer) {
 						const question = typeof msg.toolCallId === "string" ? askQuestions.get(msg.toolCallId) : undefined;
+						const notes = Array.isArray(details.notes) && details.notes.length > 0 ? `\nUser's notes on the options: ${JSON.stringify(details.notes)}` : "";
 						trusted.push({
 							source: "user answer through the ask tool",
-							text: `${question ? `Question (written by the agent): ${question}\n` : ""}User's submitted answer: ${JSON.stringify(details.answers)}`,
+							text: `${question ? `Question (written by the agent): ${question}\n` : ""}User's submitted answer: ${JSON.stringify(details.answers)}${notes}`,
 						});
 					} else {
-						pushTool(`${name} result${msg.isError === true ? " (error)" : ""} (untrusted)`, text);
+						const call = typeof msg.toolCallId === "string" ? callEntries.get(msg.toolCallId) : undefined;
+						const heading = `${name} result${msg.isError === true ? " (error)" : ""}`;
+						if (call && text.trim()) {
+							call.label = call.label.replace(/^tool call /, "tool call and result ");
+							call.text = `${call.text}\n--- ${heading} ---\n${text}`;
+						} else {
+							pushTool(`${heading} (untrusted)`, text);
+						}
 					}
 					pushImages(`${name} result image (untrusted)`, images);
 					break;
@@ -243,7 +263,12 @@ function collect(branch: readonly RawEntry[], options: CaptureOptions): Collecte
 			nonUser.push({ cls: "commentary", label: "session mode change", text: `mode: ${entry.mode}` });
 		} else if (entry.type === "custom" && entry.customType === ENTRY_TYPE && isRecord(entry.data)) {
 			const data = entry.data;
-			if (data.kind === "result" && isRecord(data.action)) {
+			if (data.kind === "plan_adoption" && typeof data.path === "string" && typeof data.content === "string") {
+				trusted.push({
+					source: "plan the user approved for implementation in native plan review (written by the agent; text as submitted for review, the user may have edited it before approving; authority limited to its scope)",
+					text: `${data.path}\n${data.content}`,
+				});
+			} else if (data.kind === "result" && isRecord(data.action)) {
 				const verdict = isRecord(data.verdict) ? data.verdict : undefined;
 				const summary = verdict
 					? `${String(verdict.outcome)} (risk ${String(verdict.risk_level)}, authorization ${String(verdict.user_authorization)}): ${String(verdict.rationale)}`
@@ -256,6 +281,9 @@ function collect(branch: readonly RawEntry[], options: CaptureOptions): Collecte
 				);
 			}
 		}
+	}
+	for (const entry of nonUser) {
+		if (entry.cls === "tool") entry.text = truncateMiddle(entry.text, TOOL_ENTRY_MAX_TOKENS * BYTES_PER_TOKEN);
 	}
 	return { trusted, nonUser, priorReviews };
 }
@@ -271,7 +299,6 @@ export function captureEvidence(branch: readonly RawEntry[], options: CaptureOpt
 		...options.inherited.map(t => ({ source: `inherited from the root session: ${t.source}`, text: t.text })),
 		...(options.agentsContext ? [{ source: "AGENTS.md context supplied by the host", text: options.agentsContext }] : []),
 		...collected.trusted,
-		...options.adoptedPlans,
 		...options.approvals,
 	];
 	const recent = collected.nonUser.slice(-RECENT_NON_USER_ENTRIES);
@@ -322,6 +349,8 @@ export interface PlannedAction {
 export interface RenderOptions {
 	retryReason?: string;
 	imageInput: boolean;
+	/** Completed investigation steps dropped from the private history to fit. */
+	omittedSteps?: number;
 }
 
 /** Evidence after admission: what is actually sent. */
@@ -375,6 +404,7 @@ function renderUserContent(evidence: AdmittedEvidence, action: PlannedAction, op
 		...(options.retryReason ? { retry_reason: options.retryReason } : {}),
 	};
 	text(`# Planned action (judge exactly this)\n${JSON.stringify(planned, null, 2)}`);
+	if (options.omittedSteps) text(`[${options.omittedSteps} earlier investigation steps were omitted to fit the context window.]`);
 	return parts;
 }
 

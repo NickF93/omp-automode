@@ -273,7 +273,7 @@ describe("sandboxed investigation", () => {
 		const result = await run([
 			() =>
 				toolCall("exec_command", {
-					cmd: `cat ${target}; echo overwrite > ${target}; echo "write=$?"; getent hosts example.com; echo "dns=$?"`,
+					cmd: `cat ${target}; echo overwrite > ${target}; echo "write=$?"; getent hosts example.com; echo "dns=$?"; systemd-run --user --quiet true 2>/dev/null; echo "systemd=$?"; echo "bus=\${DBUS_SESSION_BUS_ADDRESS:-none} agent=\${SSH_AUTH_SOCK:-none} run=$(ls /run | wc -l)"`,
 				}),
 			context => {
 				const last = context.messages.at(-1) as ToolResultMessage;
@@ -281,6 +281,8 @@ describe("sandboxed investigation", () => {
 				expect(output).toContain("precious data");
 				expect(output).toContain("write=1");
 				expect(output).not.toContain("dns=0");
+				expect(output).not.toContain("systemd=0");
+				expect(output).toContain("bus=none agent=none run=0");
 				return text('{"outcome":"deny","risk_level":"high","rationale":"deletes data"}');
 			},
 		]);
@@ -343,6 +345,25 @@ describe("sandboxed investigation", () => {
 		expect(result.stats).toMatchObject({ attempts: 1, checkpointRestarts: 1, samplingRequests: 3 });
 		const restartedRequest = seen.at(-1) as Context;
 		expect(restartedRequest.messages).toHaveLength(1);
+	});
+
+	test("investigation history is paid for by trimming optional evidence, keeping the newest step", async () => {
+		const bulky = (): EvidenceSnapshot => ({
+			...snapshot(),
+			transcript: [0, 1, 2].map(i => ({ cls: "tool" as const, label: `old ${i}`, text: String(i).repeat(3600) })),
+		});
+		const result = await run(
+			[
+				() => toolCall("exec_command", { cmd: "head -c 3000 /dev/zero | tr '\\0' x" }),
+				() => text('{"outcome":"allow"}'),
+			],
+			{ model: scriptedModel(4_200), capture: bulky },
+		);
+		expect(result.kind).toBe("verdict");
+		expect(result.stats.checkpointRestarts).toBe(0);
+		const last = seen.at(-1) as Context;
+		expect(last.messages.map(m => m.role)).toEqual(["user", "assistant", "toolResult"]);
+		expect(JSON.stringify(last.messages[0]?.content)).toContain("older transcript entries were omitted");
 	});
 
 	test("repeated exhaustion after the one restart ends as input budget", async () => {

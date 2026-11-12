@@ -81,7 +81,15 @@ export interface ConsumedEntry {
 	reviewId?: string;
 }
 
-export type PersistedEntry = ResultEntry | SelectionEntry | ApprovalEntry | ConsumedEntry;
+/** A plan the user approved in native plan review, recorded at its position on the branch. */
+export interface PlanAdoptionEntry {
+	v: 1;
+	kind: "plan_adoption";
+	path: string;
+	content: string;
+}
+
+export type PersistedEntry = ResultEntry | SelectionEntry | ApprovalEntry | ConsumedEntry | PlanAdoptionEntry;
 
 /** A completed policy denial offered by `/approve`. */
 export interface DenialEvent {
@@ -245,6 +253,10 @@ export class SessionState {
 			effort: selection?.effort ?? null,
 		});
 		this.selection = selection && (selection.model || selection.effort) ? selection : undefined;
+	}
+
+	recordPlanAdoption(path: string, content: string): void {
+		this.#append(ENTRY_TYPE, { v: 1, kind: "plan_adoption", path, content });
 	}
 
 	recordResult(entry: ResultEntry): void {

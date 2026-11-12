@@ -159,11 +159,11 @@ export class Sandbox {
 		this.#imageInput = imageInput;
 	}
 
-	/** Verify bubblewrap can start the exact profile; never falls back. */
-	static async probe(cwd: string): Promise<void> {
+	/** Verify bubblewrap can start the exact profile (from `/`, so a missing cwd is a tool error, not this); never falls back. */
+	static async probe(): Promise<void> {
 		let proc: Bun.Subprocess<"ignore", "ignore", "pipe">;
 		try {
-			proc = Bun.spawn(bwrapArgv(cwd, "true"), { stdin: "ignore", stdout: "ignore", stderr: "pipe" });
+			proc = Bun.spawn(bwrapArgv("/", "true"), { stdin: "ignore", stdout: "ignore", stderr: "pipe" });
 		} catch (error) {
 			throw new SandboxUnavailableError(`bubblewrap could not start: ${(error as Error).message}`);
 		}
@@ -253,11 +253,19 @@ export class Sandbox {
 	async #writeStdin(args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutcome> {
 		const inv = typeof args.session_id === "number" ? this.#processes.get(args.session_id) : undefined;
 		if (!inv) return { text: "Unknown or finished session_id.", isError: true };
-		if (typeof args.chars === "string" && args.chars.length > 0) {
-			inv.proc.stdin.write(args.chars);
-			await inv.proc.stdin.flush();
+		// stdin can block on a process that does not read; abort must still end the review.
+		const io = (async () => {
+			if (typeof args.chars === "string" && args.chars.length > 0) {
+				inv.proc.stdin.write(args.chars);
+				await inv.proc.stdin.flush();
+			}
+			if (args.close_stdin === true) await inv.proc.stdin.end();
+		})();
+		await Promise.race([io, abortPromise(signal)]);
+		if (signal.aborted) {
+			inv.proc.kill("SIGKILL");
+			return { text: "Review ended.", isError: true };
 		}
-		if (args.close_stdin === true) await inv.proc.stdin.end();
 		return this.#collect(
 			inv,
 			num(args.yield_time_ms, 1_000, MAX_YIELD_MS),
@@ -287,15 +295,24 @@ export class Sandbox {
 		const ext = file.split(".").pop()?.toLowerCase() ?? "";
 		const mimeType = IMAGE_TYPES[ext];
 		if (!mimeType) return { text: "Unsupported image type.", isError: true };
-		// Read through the sandbox like every other investigation.
+		// Read through the sandbox like every other investigation, without the rolling output buffer.
 		const quoted = `'${file.replaceAll("'", "'\\''")}'`;
-		const inv = this.#start(`head -c ${MAX_IMAGE_BYTES + 1} -- ${quoted} | base64 -w0`, this.#cwd);
-		await Promise.race([inv.exited, abortPromise(signal)]);
-		const data = new TextDecoder().decode(Buffer.concat(inv.output)).trim();
-		this.#processes.delete(inv.id);
-		if (inv.exitCode !== 0 || data.length === 0) return { text: "Image could not be read.", isError: true };
-		if (data.length > Math.ceil((MAX_IMAGE_BYTES * 4) / 3) + 4) return { text: "Image is too large.", isError: true };
-		return { text: `Image ${file}`, image: { type: "image", data, mimeType }, isError: false };
+		const proc = Bun.spawn(bwrapArgv(this.#cwd, `head -c ${MAX_IMAGE_BYTES + 1} -- ${quoted} | base64 -w0`), {
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "ignore",
+		});
+		const kill = () => proc.kill("SIGKILL");
+		signal.addEventListener("abort", kill, { once: true });
+		try {
+			const [data, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+			if (signal.aborted) return { text: "Review ended.", isError: true };
+			if (code !== 0 || data.trim().length === 0) return { text: "Image could not be read.", isError: true };
+			if (data.length > Math.ceil((MAX_IMAGE_BYTES * 4) / 3) + 4) return { text: "Image is too large.", isError: true };
+			return { text: `Image ${file}`, image: { type: "image", data: data.trim(), mimeType }, isError: false };
+		} finally {
+			signal.removeEventListener("abort", kill);
+		}
 	}
 
 	/** Kill and reap every investigation; idempotent. */

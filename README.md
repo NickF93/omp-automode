@@ -36,9 +36,11 @@ When the plugin is not loaded, nothing is reviewed.
 | `write xd://<tool>` | Checked exactly like a direct call of `<tool>`, once |
 
 Shell rules match whole argv words after quote removal. Only commands made of
-literal words joined by `&&`, `||`, `;`, `|` or newlines can match an `allow`
-rule; anything needing shell interpretation (variables, substitutions, globs,
-redirections, assignments, subshells) is reviewed instead.
+literal words joined by `&&`, `||`, `;`, `|` or newlines can match a rule;
+anything needing shell interpretation (variables, substitutions, globs,
+redirections, assignments, subshells) is reviewed instead. This applies to
+`forbidden` rules too: `git push 2>&1` does not match `["git", "push"]` and is
+reviewed rather than blocked.
 
 ### Review outcomes
 
@@ -64,9 +66,11 @@ explain the risk and get your decision.
 - `/auto-review`: show the effective reviewer model and effort and where each
   comes from; change either for this session, or return to the configured
   defaults. Choices are saved in the session and restored on resume.
-- `/approve`: pick one of the last ten denials on this branch to approve one
-  reviewed retry of exactly that action. The reviewer still runs, now knowing
-  you approved it; a changed action is reviewed normally.
+- `/approve`: pick one of the last ten denials on this branch, review the full
+  action and its risk, and confirm to approve one reviewed retry of exactly that
+  action. The reviewer still runs, now knowing you approved it; a changed action
+  is reviewed normally. Approvals are not restored after a resume or branch
+  change; the denial list is.
 
 ## Configuration
 
@@ -106,6 +110,9 @@ review fails rather than running anything unsandboxed.
 ## Limits
 
 - The main agent is not sandboxed; only the reviewer's investigations are.
+- OMP's bash tool keeps one shell per session, so functions, aliases, `PATH`
+  and directory changes made by an earlier (reviewed) call persist. A later
+  command skipped by an `allow` rule runs in that shell state.
 - Calls the plugin skips (see the table) are not reviewed.
 - If another extension rewrites a tool's input after this plugin has reviewed
   it, the rewritten input runs.

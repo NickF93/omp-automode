@@ -11,12 +11,12 @@ import {
 	type Effort,
 	type Message,
 	type Model,
-	type TextContent,
 	type ToolCall,
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import { classify, Flag, is, isTransientStatus, status } from "@oh-my-pi/pi-ai/error";
-import { admit, contextCeiling, type EvidenceSnapshot, estimateRequest, type PlannedAction } from "./context";
+import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { admit, type EvidenceSnapshot, estimateRequest, type PlannedAction } from "./context";
 import { defaultRationale, MAX_ATTEMPTS, RETRY_BASE_DELAY_MS } from "./policy";
 import { INVESTIGATION_TOOLS, Sandbox, SandboxUnavailableError } from "./sandbox";
 import type { Verdict } from "./state";
@@ -114,7 +114,7 @@ export function parseVerdict(text: string): Verdict {
 type AttemptOutcome =
 	| { kind: "verdict"; verdict: Verdict; fingerprint: string }
 	| { kind: "parse_error"; detail: string }
-	| { kind: "service_error"; detail: string; retryable: boolean }
+	| { kind: "service_error"; detail: string; retryable: boolean; retryAfterMs?: number }
 	| { kind: "input_budget"; detail: string }
 	| { kind: "aborted" }
 	| { kind: "failure"; detail: string };
@@ -142,10 +142,8 @@ function errorDetail(message: AssistantMessage): string {
 interface AttemptCounters {
 	checkpointRestarts: number;
 	samplingRequests: number;
-}
-
-function omissionNotice(count: number): TextContent {
-	return { type: "text", text: `[${count} earlier investigation steps were omitted to fit the context window.]` };
+	/** Completed native attempts reported by the transport, including its internal replays. */
+	nativeAttempts: number;
 }
 
 async function runAttempt(
@@ -154,76 +152,96 @@ async function runAttempt(
 	counters: AttemptCounters,
 	retryReason: string | undefined,
 ): Promise<AttemptOutcome> {
+	// Frozen checkpoint: one evidence snapshot per attempt; a restart rebuilds from it.
 	const snapshot = req.capture();
 	const systemPrompt = [req.instructions];
 	const imageInput = req.model.input.includes("image");
-	const ceiling = contextCeiling(req.model);
 	let restarted = false;
 
 	for (;;) {
-		const admission = admit(snapshot, req.action, systemPrompt, INVESTIGATION_TOOLS, req.model, { imageInput, retryReason });
-		if (!admission.ok) return { kind: "input_budget", detail: admission.reason };
 		const sandbox = new Sandbox(req.action.cwd, imageInput);
 		let sandboxChecked = false;
 		/** Completed groups: one assistant message plus all its tool results. */
 		const groups: Message[][] = [];
-		let evicted = 0;
+		let omittedSteps = 0;
+		let needRestart = false;
 		try {
 			for (;;) {
-				const first = (count: number): Message =>
-					count > 0 ? { ...admission.message, content: [...admission.message.content, omissionNotice(count)] } : admission.message;
-				let messages: Message[] = [first(evicted), ...groups.flat()];
-				while (estimateRequest(systemPrompt, INVESTIGATION_TOOLS, messages) > ceiling && groups.length > 0) {
+				// Admit evidence against the cost of the private history; drop the oldest
+				// completed steps whole, but never the newest one.
+				let admission = admit(snapshot, req.action, systemPrompt, INVESTIGATION_TOOLS, req.model, {
+					imageInput,
+					retryReason,
+					omittedSteps,
+				}, historyTokens(groups));
+				while (!admission.ok && groups.length > 1) {
 					groups.shift();
-					evicted++;
-					messages = [first(evicted), ...groups.flat()];
+					omittedSteps++;
+					admission = admit(snapshot, req.action, systemPrompt, INVESTIGATION_TOOLS, req.model, {
+						imageInput,
+						retryReason,
+						omittedSteps,
+					}, historyTokens(groups));
 				}
-				let overflow = estimateRequest(systemPrompt, INVESTIGATION_TOOLS, messages) > ceiling;
-				let response: AssistantMessage | undefined;
-				if (!overflow) {
-					if (signal.aborted) return { kind: "aborted" };
-					counters.samplingRequests++;
-					try {
-						response = await completeSimple(
-							req.model,
-							{ systemPrompt, messages, tools: INVESTIGATION_TOOLS },
-							{
-								apiKey: req.apiKey,
-								sessionId: req.sessionId,
-								signal,
-								maxHttpAttempts: 1,
-								...(req.effort ? { reasoning: req.effort as Effort } : {}),
-							},
-						);
-					} catch (error) {
-						if (signal.aborted) return { kind: "aborted" };
-						const id = classify(error);
-						const code = status(error);
-						const retryable = code !== undefined ? isTransientStatus(code) : is(id, Flag.Transient);
-						return { kind: "service_error", detail: String((error as Error)?.message ?? error).slice(0, 300), retryable };
-					}
-					if (response.stopReason === "aborted" || signal.aborted) return { kind: "aborted" };
-					if (response.stopReason === "error") {
-						if (!isContextOverflow(response)) {
-							return { kind: "service_error", detail: errorDetail(response), retryable: isRetryableResponse(response) };
-						}
-						overflow = true;
-					}
-				}
-				if (overflow) {
-					// Whole-group eviction could not admit a continuation: restart once from the frozen checkpoint.
-					if (groups.length === 0 && evicted === 0) {
-						return { kind: "input_budget", detail: "the reviewer request exceeds the model's context window" };
-					}
-					if (restarted) return { kind: "input_budget", detail: "investigation exceeded the context window twice" };
-					restarted = true;
-					counters.checkpointRestarts++;
+				if (!admission.ok) {
+					if (groups.length === 0) return { kind: "input_budget", detail: admission.reason };
+					needRestart = true;
 					break;
 				}
-				const reply = response as AssistantMessage;
-				const calls = reply.content.filter((part): part is ToolCall => part.type === "toolCall");
+				if (signal.aborted) return { kind: "aborted" };
+				counters.samplingRequests++;
+				let response: AssistantMessage;
+				try {
+					response = await completeSimple(
+						req.model,
+						{ systemPrompt, messages: [admission.message, ...groups.flat()], tools: INVESTIGATION_TOOLS },
+						{
+							apiKey: req.apiKey,
+							sessionId: req.sessionId,
+							signal,
+							maxHttpAttempts: 1,
+							...(req.effort ? { reasoning: req.effort as Effort } : {}),
+							// Each completed native attempt beyond the first is an extra sampling request.
+							onAttempt: () => counters.nativeAttempts++,
+						},
+					);
+				} catch (error) {
+					if (signal.aborted) return { kind: "aborted" };
+					const code = status(error);
+					const message = String((error as Error)?.message ?? error);
+					const retryable = code !== undefined ? isTransientStatus(code) : is(classify(error), Flag.Transient);
+					return {
+						kind: "service_error",
+						detail: message.slice(0, 300),
+						retryable,
+						retryAfterMs: extractProviderRetryHint(req.model.provider, message),
+					};
+				}
+				if (response.stopReason === "aborted" || signal.aborted) return { kind: "aborted" };
+				if (response.stopReason === "error") {
+					if (!isContextOverflow(response)) {
+						return {
+							kind: "service_error",
+							detail: errorDetail(response),
+							retryable: isRetryableResponse(response),
+							retryAfterMs: extractProviderRetryHint(req.model.provider, response.errorMessage),
+						};
+					}
+					// The server's own limit was hit: drop an older step, else restart from the checkpoint.
+					if (groups.length > 1) {
+						groups.shift();
+						omittedSteps++;
+						continue;
+					}
+					if (groups.length === 0) {
+						return { kind: "input_budget", detail: "the reviewer request exceeds the model's context window" };
+					}
+					needRestart = true;
+					break;
+				}
+				const calls = response.content.filter((part): part is ToolCall => part.type === "toolCall");
 				if (calls.length === 0) {
-					const text = reply.content.map(part => (part.type === "text" ? part.text : "")).join("");
+					const text = response.content.map(part => (part.type === "text" ? part.text : "")).join("");
 					try {
 						return { kind: "verdict", verdict: parseVerdict(text), fingerprint: snapshot.trustFingerprint };
 					} catch (error) {
@@ -232,7 +250,7 @@ async function runAttempt(
 				}
 				if (!sandboxChecked) {
 					try {
-						await Sandbox.probe(req.action.cwd);
+						await Sandbox.probe();
 					} catch (error) {
 						if (error instanceof SandboxUnavailableError) return { kind: "failure", detail: error.message };
 						throw error;
@@ -253,12 +271,22 @@ async function runAttempt(
 					}),
 				);
 				if (signal.aborted) return { kind: "aborted" };
-				groups.push([reply, ...results]);
+				groups.push([response, ...results]);
 			}
 		} finally {
 			await sandbox.dispose();
 		}
+		if (!needRestart) continue;
+		// One checkpoint restart per attempt, with fresh processes and no discarded history.
+		if (restarted) return { kind: "input_budget", detail: "investigation exceeded the context window again after a restart" };
+		restarted = true;
+		counters.checkpointRestarts++;
 	}
+}
+
+function historyTokens(groups: readonly Message[][]): number {
+	const history = groups.flat();
+	return history.length > 0 ? estimateRequest([], [], history) : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -288,9 +316,15 @@ export async function review(req: ReviewRequest): Promise<ReviewResult> {
 	const deadlineController = new AbortController();
 	const timer = setTimeout(() => deadlineController.abort(), req.timeoutMs);
 	const signal = AbortSignal.any([req.signal, deadlineController.signal]);
-	const counters: AttemptCounters = { checkpointRestarts: 0, samplingRequests: 0 };
+	const counters: AttemptCounters = { checkpointRestarts: 0, samplingRequests: 0, nativeAttempts: 0 };
 	let attempts = 0;
-	const stats = (): ReviewStats => ({ attempts, ...counters, elapsedMs: Date.now() - started });
+	const stats = (): ReviewStats => ({
+		attempts,
+		checkpointRestarts: counters.checkpointRestarts,
+		// Native replays inside one completion count as extra sampling requests.
+		samplingRequests: Math.max(counters.samplingRequests, counters.nativeAttempts),
+		elapsedMs: Date.now() - started,
+	});
 	const ended = (): ReviewResult =>
 		req.signal.aborted ? { kind: "cancelled", stats: stats() } : { kind: "timeout", stats: stats() };
 	let retryReason: string | undefined;
@@ -299,6 +333,7 @@ export async function review(req: ReviewRequest): Promise<ReviewResult> {
 			attempts++;
 			const outcome = await runAttempt(req, signal, counters, retryReason);
 			let backoff = true;
+			let retryAfterMs = 0;
 			switch (outcome.kind) {
 				case "verdict":
 					if (outcome.fingerprint === req.currentTrust()) {
@@ -314,6 +349,7 @@ export async function review(req: ReviewRequest): Promise<ReviewResult> {
 				case "service_error":
 					if (!outcome.retryable) return { kind: "failure", detail: outcome.detail, stats: stats() };
 					retryReason = outcome.detail;
+					retryAfterMs = outcome.retryAfterMs ?? 0;
 					break;
 				case "aborted":
 					return ended();
@@ -326,7 +362,8 @@ export async function review(req: ReviewRequest): Promise<ReviewResult> {
 				return { kind: "failure", detail: `${retryReason} after ${attempts} attempts`, stats: stats() };
 			}
 			if (backoff) {
-				const delay = RETRY_BASE_DELAY_MS * 2 ** (attempts - 1) * (0.9 + Math.random() * 0.2);
+				// The later of jittered backoff and the provider's retry time, bounded by the deadline below.
+				const delay = Math.max(RETRY_BASE_DELAY_MS * 2 ** (attempts - 1) * (0.9 + Math.random() * 0.2), retryAfterMs);
 				await sleepUntil(Math.min(delay, deadline - Date.now()), signal);
 			} else {
 				await Bun.sleep(0);

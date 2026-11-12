@@ -5,7 +5,9 @@
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ShellRule } from "./settings";
+import { isRecord } from "./state";
 
 /** Metadata the gate reads from the host's live tool registry. */
 export interface GateToolInfo {
@@ -70,8 +72,8 @@ const PROTECTED_COMPONENTS: Record<string, true> = toRecord([".git", ".agents", 
 const EXEMPT_WRITE_PROTOCOLS: Record<string, true> = toRecord(["local", "agent", "proc"]);
 /** Device writes that only show documentation. */
 const DEVICE_HELP_RE = /^\s*(\?|help)?\s*$/i;
-/** Devices that apply or report state already gated when it was staged. */
-const CONTROL_DEVICES: Record<string, true> = toRecord(["resolve", "report_issue"]);
+/** Plain-text control devices: apply or reject a preview gated when it was staged, propose a plan, report a tool issue. */
+const CONTROL_DEVICES: Record<string, true> = toRecord(["resolve", "reject", "propose", "report_issue"]);
 
 const URL_SCHEME_RE = /^([a-z][a-z0-9+.-]*):\/\//i;
 
@@ -104,10 +106,28 @@ export function gate(input: GateInput): GateResult {
 // write and mounted devices
 // ---------------------------------------------------------------------------
 
+/**
+ * Strip a hashline header wrapper (`[path]`, `[path#1A2B]`) exactly as the host
+ * does before it routes a write, so the gate judges the path that is written.
+ */
+export function unwrapHeaderPath(target: string): string {
+	const trimmed = target.trimEnd();
+	if (trimmed.length < 2 || trimmed[0] !== "[" || trimmed[trimmed.length - 1] !== "]") return target;
+	const inner = trimmed.slice(1, -1);
+	const tag = HASHLINE_TAG_RE.exec(inner);
+	const pathPart = tag ? inner.slice(0, tag.index) : inner;
+	if (pathPart.length === 0 || (!tag && pathPart.includes("#"))) return target;
+	return pathPart;
+}
+
 function gateWrite(input: GateInput): GateResult {
-	const target = input.input.path;
-	if (typeof target !== "string" || target.length === 0) return { kind: "review" };
+	const raw = input.input.path;
+	if (typeof raw !== "string" || raw.length === 0) return { kind: "review" };
+	const unwrapped = unwrapHeaderPath(raw);
+	// `@scheme://…` is the host's shorthand for an internal URL.
+	const target = /^@[a-z][a-z0-9+.-]*:\/\//i.test(unwrapped) ? unwrapped.slice(1) : unwrapped;
 	const scheme = URL_SCHEME_RE.exec(target)?.[1]?.toLowerCase();
+	if (scheme === "file") return gateLocalTargets([target], input.cwd);
 	if (scheme === "xd") return gateDevice(input, target.slice("xd://".length));
 	if (scheme && EXEMPT_WRITE_PROTOCOLS[scheme]) return { kind: "skip", reason: `${scheme}:// write` };
 	if (scheme) return { kind: "review" };
@@ -155,10 +175,20 @@ function backingFile(target: string, cwd: string): string {
 	return resolveAgainst(target, cwd);
 }
 
+/** Host path spellings: stray leading `:`, `@/`/`@~` shorthands, `file://` URLs and `~`. */
 function expandHome(p: string): string {
-	if (p === "~") return homedir();
-	if (p.startsWith("~/")) return path.join(homedir(), p.slice(2));
-	return p;
+	let value = /^:(?=[/\\~]|\.\.?[/\\])/.test(p) ? p.slice(1) : p;
+	if (value.startsWith("@/") || value === "@~" || value.startsWith("@~/")) value = value.slice(1);
+	if (value.toLowerCase().startsWith("file://")) {
+		try {
+			value = fileURLToPath(value);
+		} catch {
+			// not a valid file URL: resolve it literally
+		}
+	}
+	if (value === "~") return homedir();
+	if (value.startsWith("~/")) return path.join(homedir(), value.slice(2));
+	return value;
 }
 
 function resolveAgainst(p: string, cwd: string): string {
@@ -187,7 +217,7 @@ export function realTarget(absolute: string): string {
 /** True when the target lies inside cwd and outside protected directories. */
 export function isLocalUnprotected(target: string, cwd: string): boolean {
 	const scheme = URL_SCHEME_RE.exec(target)?.[1]?.toLowerCase();
-	if (scheme) return false;
+	if (scheme && scheme !== "file") return false;
 	const root = realTarget(path.resolve(cwd));
 	const resolved = realTarget(backingFile(target, cwd));
 	const rel = path.relative(root, resolved);
@@ -199,7 +229,9 @@ export function isLocalUnprotected(target: string, cwd: string): boolean {
 function gateLocalTargets(targets: string[] | undefined, cwd: string): GateResult {
 	if (!targets || targets.length === 0) return { kind: "review" };
 	const remote: string[] = [];
-	for (const target of targets) {
+	for (const raw of targets) {
+		const unwrapped = unwrapHeaderPath(raw);
+		const target = /^@[a-z][a-z0-9+.-]*:\/\//i.test(unwrapped) ? unwrapped.slice(1) : unwrapped;
 		const scheme = URL_SCHEME_RE.exec(target)?.[1]?.toLowerCase();
 		if (scheme && EXEMPT_WRITE_PROTOCOLS[scheme]) continue;
 		if (!isLocalUnprotected(target, cwd)) remote.push(target);
@@ -229,6 +261,17 @@ export function editTargets(input: Record<string, unknown>): string[] | undefine
 	}
 	const paths = input.paths;
 	if (Array.isArray(paths)) for (const p of paths) if (typeof p === "string" && p.length > 0) targets.push(p);
+	// Patch mode: every entry may rename its file.
+	const edits = input.edits;
+	if (Array.isArray(edits)) {
+		for (const entry of edits) {
+			if (!isRecord(entry)) continue;
+			for (const key of ["rename", "move", "path"]) {
+				const value = entry[key];
+				if (typeof value === "string" && value.length > 0) targets.push(value);
+			}
+		}
+	}
 	for (const key of ["input", "_input"]) {
 		const body = input[key];
 		if (typeof body !== "string") continue;
@@ -268,12 +311,7 @@ function gateLsp(input: Record<string, unknown>, cwd: string): GateResult {
 	const action = typeof input.action === "string" ? input.action.toLowerCase() : "";
 	if (LSP_QUERY_ACTIONS[action]) return { kind: "skip", reason: "LSP query" };
 	if (action === "code_actions" && input.apply !== true) return { kind: "skip", reason: "LSP query" };
-	if (action === "rename_file") {
-		const from = input.file;
-		const to = input.new_name;
-		if (typeof from === "string" && typeof to === "string") return gateLocalTargets([from, to], cwd);
-	}
-	// rename, applied code actions and raw requests can edit files beyond the named one.
+	// Renames (including file renames, which rewrite references), applied code actions and raw requests can edit files beyond the named ones.
 	return { kind: "review" };
 }
 
@@ -400,6 +438,12 @@ function lexLiteralWords(source: string): Token[] | undefined {
  * or newlines into each command's argv. Undefined is not a ban: anything the
  * parser cannot prove literal goes to review.
  */
+/** Shell reserved words and prefixes that turn the following words into syntax rather than an argv. */
+const RESERVED_COMMAND_WORDS: Record<string, true> = toRecord([
+	"if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac",
+	"function", "select", "time", "coproc", "in", "[[", "]]", "!", "{", "}",
+]);
+
 export function parseWordOnlySequence(source: string): string[][] | undefined {
 	const tokens = lexLiteralWords(source);
 	if (!tokens) return undefined;
@@ -422,5 +466,7 @@ export function parseWordOnlySequence(source: string): string[][] | undefined {
 	}
 	if (current.length > 0) commands.push(current);
 	else if (needCommand) return undefined;
+	// A reserved word in command position is grammar, not a program name.
+	if (commands.some(argv => RESERVED_COMMAND_WORDS[argv[0] as string])) return undefined;
 	return commands.length > 0 ? commands : undefined;
 }

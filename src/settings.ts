@@ -180,10 +180,19 @@ const HOST_TIMEOUT_ID = "extensionHandlers.toolCallTimeoutMs";
 /** Host default when its setting is unset, nonpositive or not finite. */
 const HOST_DEFAULT_TIMEOUT_MS = 30_000;
 
+function getOwn(layer: unknown, segments: readonly string[]): unknown {
+	let node = layer;
+	for (const segment of segments) {
+		if (!node || typeof node !== "object") return undefined;
+		node = (node as Record<string, unknown>)[segment];
+	}
+	return node;
+}
+
 interface DeadlineOwnership {
 	owners: Map<string, number>;
 	applied?: number;
-	prior?: { override: boolean; value: unknown };
+	prior?: { override: boolean; value: unknown; effective: number };
 }
 
 const deadlineOwners = new WeakMap<Settings, DeadlineOwnership>();
@@ -206,12 +215,13 @@ function applyDeadline(settings: Settings, own: DeadlineOwnership): void {
 	const need = Math.max(0, ...own.owners.values());
 	if (own.applied === undefined) {
 		if (current >= need) return;
-		own.prior = { override: settings.hasRuntimeOverride(handle), value: raw };
-	} else if (own.applied === need) {
-		return;
+		// Own runtime layer only: an overlay's inherited override must stay inherited.
+		const ownOverride = getOwn(settings.overlayLayers().overrides, handle.segments);
+		own.prior = { override: ownOverride !== undefined, value: ownOverride, effective: current };
 	}
-	const floor = own.prior && typeof own.prior.value === "number" ? own.prior.value : 0;
-	const value = Math.max(need, floor);
+	// Never go below what was in effect before the plugin raised it.
+	const value = Math.max(need, own.prior?.effective ?? 0);
+	if (value === own.applied) return;
 	handle.override(settings, value);
 	own.applied = value;
 }

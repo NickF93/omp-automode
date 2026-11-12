@@ -53,22 +53,31 @@ const STATUS_KEY = "omp-automode";
 // Root-to-child trusted context. Only real host parent identities link here.
 // ---------------------------------------------------------------------------
 
-const trustedByAgent = new Map<string, () => TrustedInstruction[]>();
+/**
+ * Agent ids are unique within one root session but two roots in one process
+ * may share an id; an ambiguous parent id inherits nothing rather than another
+ * root's instructions.
+ */
+const trustedByAgent = new Map<string, Set<() => TrustedInstruction[]>>();
 
 function inheritedFor(ctx: ExtensionContext): TrustedInstruction[] {
 	if (ctx.agent.kind !== "sub" || !ctx.agent.parentId) return [];
-	return trustedByAgent.get(ctx.agent.parentId)?.() ?? [];
+	const getters = trustedByAgent.get(ctx.agent.parentId);
+	if (!getters || getters.size !== 1) return [];
+	const [getter] = getters;
+	return getter?.() ?? [];
 }
 
 // ---------------------------------------------------------------------------
 
 const AGENTS_BLOCK_RE = /<repo-rules>[\s\S]*?<\/repo-rules>|<dir-context>[\s\S]*?<\/dir-context>/g;
-const BROWSER_USE_RE = /\b(browser|computer)\b|\btab\.(goto|click|type|fill|press|run|evaluate)\b/;
-
-function usesBrowser(tool: string, input: Record<string, unknown>): boolean {
-	if (tool === "computer" || tool === "browser") return true;
-	if (tool !== "eval" && tool !== "debug") return false;
-	return BROWSER_USE_RE.test(JSON.stringify(input));
+/**
+ * Browser/computer rules accompany every call that can drive a browser: eval
+ * and debug keep live aliases across calls, so the input text cannot tell.
+ * The rules themselves apply only to actual browser activity.
+ */
+function canDriveBrowser(tool: string): boolean {
+	return tool === "computer" || tool === "browser" || tool === "eval" || tool === "debug";
 }
 
 function modelLookup(ctx: ExtensionContext, pi: ExtensionAPI): ModelLookup {
@@ -89,17 +98,16 @@ export default function automode(pi: ExtensionAPI): void {
 	const state = new SessionState((customType, data) => pi.appendEntry(customType, data));
 	const inflight = new Set<AbortController>();
 	const pendingPlans = new Map<string, { path: string; content: string }>();
-	const adoptedPlans: TrustedInstruction[] = [];
 	let agentsContext: string | undefined;
 	let deadlineOwner: string | undefined;
 	let deadlineSettings: Settings | undefined;
 	let agentId: string | undefined;
+	let lineageGetter: (() => TrustedInstruction[]) | undefined;
 
 	const captureOptions = (ctx: ExtensionContext, approvals: TrustedInstruction[]): CaptureOptions => ({
 		isChild: ctx.agent.kind === "sub",
 		agentsContext,
 		inherited: inheritedFor(ctx),
-		adoptedPlans,
 		approvals,
 	});
 
@@ -147,8 +155,12 @@ export default function automode(pi: ExtensionAPI): void {
 		restore(ctx);
 		const sessionManager = ctx.sessionManager;
 		const snapshotCtx = ctx;
+		if (agentId !== undefined && lineageGetter) trustedByAgent.get(agentId)?.delete(lineageGetter);
 		agentId = ctx.agent.id;
-		trustedByAgent.set(agentId, () => captureEvidence(sessionManager.getBranch(), captureOptions(snapshotCtx, [])).trusted);
+		lineageGetter = () => captureEvidence(sessionManager.getBranch(), captureOptions(snapshotCtx, [])).trusted;
+		const getters = trustedByAgent.get(agentId) ?? new Set();
+		getters.add(lineageGetter);
+		trustedByAgent.set(agentId, getters);
 		await ensureDeadline(ctx);
 		await showStatus(ctx);
 	});
@@ -164,7 +176,11 @@ export default function automode(pi: ExtensionAPI): void {
 		state.expireLive();
 		if (deadlineSettings && deadlineOwner) releaseHostDeadline(deadlineSettings, deadlineOwner);
 		deadlineSettings = undefined;
-		if (agentId !== undefined) trustedByAgent.delete(agentId);
+		if (agentId !== undefined && lineageGetter) {
+			const getters = trustedByAgent.get(agentId);
+			getters?.delete(lineageGetter);
+			if (getters?.size === 0) trustedByAgent.delete(agentId);
+		}
 	});
 
 	pi.on("before_agent_start", event => {
@@ -191,10 +207,12 @@ export default function automode(pi: ExtensionAPI): void {
 		pendingPlans.delete(event.reviewId);
 		if (!plan || event.by !== "local") return;
 		if (event.choice !== "execute" && event.choice !== "keep" && event.choice !== "compact") return;
-		adoptedPlans.push({
-			source: "plan the user approved for implementation in native plan review (content written by the agent; authority limited to its scope)",
-			text: `${plan.path}\n${plan.content}`,
-		});
+		try {
+			// The user may edit the plan inside the review before approving; this is the submitted text.
+			state.recordPlanAdoption(plan.path, plan.content);
+		} catch {
+			// Not persisted: the plan simply carries no adoption evidence.
+		}
 	});
 
 	pi.on("tool_call", async (event, ctx) => handleToolCall(event, ctx));
@@ -287,7 +305,7 @@ export default function automode(pi: ExtensionAPI): void {
 			toolDescription: call.toolDescription,
 		};
 		const template = settings.policyTemplate ?? DEFAULT_POLICY_TEMPLATE;
-		const policy = `${settings.policy ?? DEFAULT_POLICY}${usesBrowser(call.tool, call.input) ? `\n\n${BROWSER_POLICY}` : ""}`;
+		const policy = `${settings.policy ?? DEFAULT_POLICY}${canDriveBrowser(call.tool) ? `\n\n${BROWSER_POLICY}` : ""}`;
 		const instructions = `${renderPolicy(template, policy, settings.extraPolicy ?? "")}\n\n${OUTPUT_CONTRACT}`;
 		const capture = () => captureEvidence(ctx.sessionManager.getBranch(), captureOptions(ctx, approvals));
 		const controller = new AbortController();
@@ -420,6 +438,11 @@ export default function automode(pi: ExtensionAPI): void {
 			ctx.ui.notify("That denial belongs to another session; nothing was approved.", "warning");
 			return;
 		}
+		const confirmed = await ctx.ui.confirm(
+			"Approve one reviewed retry of this exact action?",
+			`Risk ${denial.verdict.risk_level}, authorization ${denial.verdict.user_authorization}: ${denial.verdict.rationale}\n\n${JSON.stringify({ tool: denial.action.tool, input: denial.action.input, cwd: denial.action.cwd }, null, 2)}\n\nThe retry is reviewed again with your approval as context. Any change to the action needs a normal review.`,
+		);
+		if (!confirmed) return;
 		state.grant("denial_retry", denial.action, ctx.sessionManager.getLeafId(), denial);
 		ctx.ui.notify(
 			"Approved one retry of exactly that action. It will be reviewed again with your approval as context; a changed action is reviewed normally.",

@@ -67,6 +67,8 @@ describe("word-only shell parsing", () => {
 		["double semicolon", "a ;; b"],
 		["unterminated quote", "echo 'x"],
 		["nested script", "bash -c 'rm -rf /' && $(true)"],
+		["reserved word time", "time rm -rf build"],
+		["control flow keyword", "if true; then rm x; fi"],
 	])("%s is not literal", (_name, command) => {
 		expect(parseWordOnlySequence(command)).toBeUndefined();
 	});
@@ -140,8 +142,8 @@ describe("tool mapping", () => {
 		expect(run("lsp", { action: "hover", file: "src/a.ts" })).toBe("skip");
 		expect(run("lsp", { action: "code_actions", file: "src/a.ts" })).toBe("skip");
 		expect(run("lsp", { action: "rename", file: "src/a.ts", new_name: "b" })).toBe("review");
-		expect(run("lsp", { action: "rename_file", file: "src/a.ts", new_name: "src/b.ts" })).toBe("skip");
-		expect(run("lsp", { action: "rename_file", file: "src/a.ts", new_name: "../elsewhere/b.ts" })).toBe("review");
+		// File renames also rewrite references the language server chooses.
+		expect(run("lsp", { action: "rename_file", file: "src/a.ts", new_name: "src/b.ts" })).toBe("review");
 	});
 });
 
@@ -155,6 +157,26 @@ describe("write and edit targets", () => {
 		expect(run("write", { path: ".omp/config.yml", content: "x" })).toBe("review");
 		expect(run("write", { path: "sub/.agents/skill.md", content: "x" })).toBe("review");
 		expect(run("write", { path: "ssh://host/etc/x", content: "x" })).toBe("review");
+	});
+
+	test("hashline-wrapped write paths are judged by the path the host writes", () => {
+		expect(run("write", { path: "[.git/hooks/pre-commit]", content: "x" })).toBe("review");
+		expect(run("write", { path: "[../elsewhere/x.txt#ABCD]", content: "x" })).toBe("review");
+		expect(run("write", { path: "[ssh://host/etc/x]", content: "x" })).toBe("review");
+		expect(run("write", { path: "[src/ok.ts#1A2B]", content: "x" })).toBe("skip");
+	});
+
+	test("host path shorthands are normalized before containment", () => {
+		expect(run("write", { path: `@${path.join(outside, "x.txt")}`, content: "x" })).toBe("review");
+		expect(run("write", { path: `:${path.join(outside, "x.txt")}`, content: "x" })).toBe("review");
+		expect(run("write", { path: `file://${path.join(cwd, ".git", "config")}`, content: "x" })).toBe("review");
+		expect(run("write", { path: `file://${path.join(cwd, "src", "ok.ts")}`, content: "x" })).toBe("skip");
+		expect(run("write", { path: "@local://PLAN.md", content: "x" })).toBe("skip");
+	});
+
+	test("patch-mode renames are targets", () => {
+		expect(run("edit", { path: "src/a.ts", edits: [{ op: "update", rename: ".git/hooks/pre-commit", diff: "" }] })).toBe("review");
+		expect(run("edit", { path: "src/a.ts", edits: [{ op: "update", rename: "src/b.ts", diff: "" }] })).toBe("skip");
 	});
 
 	test("symlinked ancestors resolve to their real location", () => {
@@ -212,6 +234,13 @@ describe("mounted devices", () => {
 	test("there is no blanket xd:// write exemption", () => {
 		expect(run("write", { path: "xd://some_mcp_tool", content: "{}" })).toBe("review");
 		expect(run("write", { path: "xd://eval", content: "not json" })).toBe("review");
+	});
+
+	test("plan proposal and preview resolution devices are control, not reviewed", () => {
+		for (const device of ["propose", "resolve", "reject"]) {
+			expect(run("write", { path: `xd://${device}`, content: "capitalize-helper" })).toBe("skip");
+		}
+		expect(run("write", { path: "xd://some_device", content: "plain text" })).toBe("review");
 	});
 
 	test("documentation requests are read-only", () => {

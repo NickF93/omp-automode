@@ -128,6 +128,17 @@ describe("host handler deadline", () => {
 		expect(value(s)).toBe(400_000);
 	});
 
+	test("an overlay's inherited override stays inherited after release", () => {
+		const parent = Settings.isolated();
+		handle.override(parent, 45_000);
+		const child = parent.overlay({});
+		requireHostDeadline(child, "x", 95_000);
+		expect([value(child), value(parent)]).toEqual([95_000, 45_000]);
+		releaseHostDeadline(child, "x");
+		handle.override(parent, 50_000);
+		expect(value(child)).toBe(50_000);
+	});
+
 	test("a prior runtime override is restored rather than cleared", () => {
 		const s = Settings.isolated();
 		handle.override(s, 45_000);
