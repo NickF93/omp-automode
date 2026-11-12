@@ -310,7 +310,8 @@ export class Sandbox {
 			const [data, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
 			if (signal.aborted) return { text: "Review ended.", isError: true };
 			if (code !== 0 || data.trim().length === 0) return { text: "Image could not be read.", isError: true };
-			if (data.length > Math.ceil((MAX_IMAGE_BYTES * 4) / 3) + 4) return { text: "Image is too large.", isError: true };
+			// One byte over the limit was read on purpose: its base64 is longer than the limit's.
+			if (data.trim().length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4) return { text: "Image is too large.", isError: true };
 			return { text: `Image ${file}`, image: { type: "image", data: data.trim(), mimeType }, isError: false };
 		} finally {
 			signal.removeEventListener("abort", kill);

@@ -108,6 +108,19 @@ describe("trust labelling", () => {
 		expect(snap.trusted.map(t => t.text)).toEqual(["plan it", "local://PLAN.md\n1. edit src", "Actually, do not touch src/legacy."]);
 	});
 
+	test("the host's plan-approved prompt supplies the exact approved plan text", () => {
+		const snap = captureEvidence(
+			[
+				{ type: "custom", customType: "omp-automode", data: { v: 1, kind: "plan_adoption", path: "local://PLAN.md", content: "1. edit src\n2. deploy prod", fromFile: false } },
+				msg({ role: "developer", synthetic: true, content: 'Plan approved.\n<instruction>x</instruction>\n\n<plan path="local://PLAN.md">\n1. edit src\n</plan>\n' }),
+			],
+			options(),
+		);
+		expect(snap.trusted).toHaveLength(1);
+		expect(snap.trusted[0]?.text).toBe("local://PLAN.md\n1. edit src");
+		expect(snap.trusted[0]?.source).toContain("exactly as approved");
+	});
+
 	test("synthetic developer prompts are untrusted unless a human started them", () => {
 		const snap = captureEvidence(
 			[

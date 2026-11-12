@@ -136,6 +136,8 @@ interface Collected {
 }
 
 const SKILL_PROMPT_TYPE = "skill-prompt";
+/** The host's plan-approved prompt inlines the approved plan text. */
+const APPROVED_PLAN_RE = /^Plan approved\.[\s\S]*?<plan path="([^"]+)">\n([\s\S]*?)\n<\/plan>/;
 
 /** Walk the raw active branch and label every piece of evidence. */
 function collect(branch: readonly RawEntry[], options: CaptureOptions): Collected {
@@ -143,6 +145,8 @@ function collect(branch: readonly RawEntry[], options: CaptureOptions): Collecte
 	const nonUser: TranscriptEntry[] = [];
 	const priorReviews: string[] = [];
 	const askQuestions = new Map<string, string>();
+	/** Adopted plans by path: the host's plan-approved prompt carries the exact approved text, including in-review edits. */
+	const adoptions = new Map<string, TrustedInstruction>();
 	/** Tool calls by id, so each result joins its call in one entry that is kept or evicted together. */
 	const callEntries = new Map<string, TranscriptEntry>();
 	const pushTool = (label: string, text: string) => {
@@ -163,12 +167,24 @@ function collect(branch: readonly RawEntry[], options: CaptureOptions): Collecte
 						if (text.trim()) trusted.push({ source: "user message", text });
 						pushImages("image attached by the user", images);
 					} else {
+						const approved = APPROVED_PLAN_RE.exec(text);
+						const adoption = approved ? adoptions.get(approved[1] as string) : undefined;
+						if (adoption && approved) {
+							adoption.source = "plan the user approved for implementation in native plan review (written by the agent; exactly as approved; authority limited to its scope)";
+							adoption.text = `${approved[1]}\n${approved[2]}`;
+						}
 						const label = options.isChild ? "task text from the parent agent (untrusted)" : "agent-injected user-role message (untrusted)";
 						nonUser.push({ cls: "commentary", label, text: truncateMiddle(text, ASSISTANT_ENTRY_MAX_TOKENS * BYTES_PER_TOKEN) });
 					}
 					break;
 				}
 				case "developer": {
+					const approved = APPROVED_PLAN_RE.exec(text);
+					const adoption = approved ? adoptions.get(approved[1] as string) : undefined;
+					if (adoption && approved) {
+						adoption.source = "plan the user approved for implementation in native plan review (written by the agent; exactly as approved; authority limited to its scope)";
+						adoption.text = `${approved[1]}\n${approved[2]}`;
+					}
 					// Synthetic developer prompts are harness or extension injections unless a human started them.
 					const human =
 						!options.isChild && msg.attribution !== "agent" && (msg.synthetic !== true || msg.userInitiated === true);
@@ -264,10 +280,12 @@ function collect(branch: readonly RawEntry[], options: CaptureOptions): Collecte
 		} else if (entry.type === "custom" && entry.customType === ENTRY_TYPE && isRecord(entry.data)) {
 			const data = entry.data;
 			if (data.kind === "plan_adoption" && typeof data.path === "string" && typeof data.content === "string") {
-				trusted.push({
+				const item: TrustedInstruction = {
 					source: `plan the user approved for implementation in native plan review (written by the agent; ${data.fromFile === true ? "plan file as approved" : "text as submitted for review; edits made during review are not shown"}; authority limited to its scope)`,
 					text: `${data.path}\n${data.content}`,
-				});
+				};
+				trusted.push(item);
+				adoptions.set(data.path, item);
 			} else if (data.kind === "result" && isRecord(data.action)) {
 				const verdict = isRecord(data.verdict) ? data.verdict : undefined;
 				const summary = verdict

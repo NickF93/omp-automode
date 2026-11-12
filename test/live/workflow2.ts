@@ -81,8 +81,9 @@ const ui = (req: Record<string, unknown>) => {
 	if (req.method === "confirm") return { confirmed: false };
 	// Native ask dialog answered field by field through select/input.
 	if (askAnswer === "none") return undefined;
-	const yes = options.find(o => /yes|proceed|approve|delete|confirm/i.test(o));
-	const no = options.find(o => /no|cancel|keep|abort|don't|do not/i.test(o));
+	// Match the option's leading verb only: "Delete … and nothing else" is an approval, not a "no".
+	const yes = options.find(o => /^(yes|proceed|approve|delete|confirm|run)\b/i.test(o));
+	const no = options.find(o => /^(no|cancel|keep|abort|don't|do not|leave)\b/i.test(o));
 	const pick = askAnswer === "approve" ? yes : no;
 	if (req.method === "select") return pick ? { value: pick } : undefined;
 	if (req.method === "input") return { value: askAnswer === "approve" ? "Yes, I understand the risk; delete exactly that archive directory." : "No, keep it." };

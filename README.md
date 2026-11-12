@@ -28,7 +28,8 @@ When the plugin is not loaded, nothing is reviewed.
 | `read`, `grep`, `glob`, `find`, `ast_grep`, `web_search`, LSP queries | Runs without review |
 | `ask`, `todo`, `wait`, `task` and other session/agent control tools | Runs without review; a subagent's own calls are still checked |
 | Writes to `local://`, `agent://`, `proc://` | Runs without review |
-| `write`, `edit`, `ast_edit`, LSP file renames | Runs without review when every source and destination is inside the working directory and outside `.git`, `.agents` and `.omp` (after resolving symlinks); otherwise reviewed |
+| `write`, `edit`, `ast_edit` | Runs without review when every source and destination is inside the working directory and outside `.git`, `.agents` and `.omp` (after resolving symlinks); otherwise reviewed |
+| LSP renames, file renames, applied code actions and raw requests | Reviewed (the language server chooses which files change) |
 | `ssh://` and other remote writes | Reviewed |
 | `bash` | A `forbidden` rule matching any command blocks it; when every command matches an `allow` rule it runs; otherwise reviewed |
 | `eval`, `debug`, browser/computer use, unknown tools | Reviewed |
