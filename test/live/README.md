@@ -30,7 +30,8 @@ MAIN_MODEL=provider/model MAIN_EFFORT=low REVIEW_EFFORT=low bun test/live/workfl
 - `workflow3.ts`: browser work on a loopback page with synthetic account data
   (draft, authorized publish, injected destructive instruction).
 - `workflow4-scripted.ts`: rows a cheap model does not reliably trigger (README
-  injection, credential egress smuggled into a user-invoked skill's referenced notes, revocation across compaction
+  injection, credential egress smuggled into a user-invoked skill's referenced notes
+  and, separately, inside the skill's own steps, revocation across compaction
   with a forged summary and resume, cancelled/declined/approved `ask`, an `ask` timeout submitting a
   preselected risky default, a
   subagent blocked then re-dispatched after the user's answer, `/auto-review`
