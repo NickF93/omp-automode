@@ -349,6 +349,8 @@ export interface PlannedAction {
 export interface RenderOptions {
 	retryReason?: string;
 	imageInput: boolean;
+	/** Allow the last recovery step (shortening older trusted instructions); callers with other recovery left disable it. */
+	shortenTrusted?: boolean;
 	/** Completed investigation steps dropped from the private history to fit. */
 	omittedSteps?: number;
 }
@@ -514,16 +516,21 @@ export function admit(
 	}
 	if (current.tokens <= ceiling) return { ok: true, ...current, evidence };
 
-	// Last step: shorten older trusted instructions, oldest first, never the newest.
-	for (let i = 0; i < evidence.trusted.length - 1 && current.tokens > ceiling; i++) {
-		const item = evidence.trusted[i] as TrustedInstruction;
-		const original = item.text;
-		let target = estimateTokens(original);
-		while (current.tokens > ceiling && target > MIN_SHORTENED_TOKENS) {
-			target = Math.max(MIN_SHORTENED_TOKENS, target - (current.tokens - ceiling));
-			if (item.text === original) evidence.shortenedInstructions++;
-			item.text = truncateMiddle(original, target * BYTES_PER_TOKEN);
-			current = measure();
+	// Last step: shorten older trusted instructions, oldest first. The newest user
+	// message and explicit approvals for this action are never shortened.
+	if (options.shortenTrusted !== false) {
+		const newestUser = evidence.trusted.findLastIndex(t => t.source === "user message");
+		for (let i = 0; i < evidence.trusted.length && current.tokens > ceiling; i++) {
+			const item = evidence.trusted[i] as TrustedInstruction;
+			if (i === newestUser || item.source.startsWith("explicit approval")) continue;
+			const original = item.text;
+			let target = estimateTokens(original);
+			while (current.tokens > ceiling && target > MIN_SHORTENED_TOKENS) {
+				target = Math.max(MIN_SHORTENED_TOKENS, target - (current.tokens - ceiling));
+				if (item.text === original) evidence.shortenedInstructions++;
+				item.text = truncateMiddle(original, target * BYTES_PER_TOKEN);
+				current = measure();
+			}
 		}
 	}
 	if (current.tokens <= ceiling) return { ok: true, ...current, evidence };

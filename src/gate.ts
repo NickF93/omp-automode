@@ -162,7 +162,9 @@ function gateDevice(input: GateInput, rest: string): GateResult {
 // ---------------------------------------------------------------------------
 
 /** Archive and SQLite selectors address a member of an existing backing file. */
-function backingFile(target: string, cwd: string): string {
+function backingFile(raw: string, cwd: string): string {
+	// Decode host spellings (file:// URLs, @/ and : prefixes) before looking for a member selector.
+	const target = expandHome(raw);
 	const colon = target.indexOf(":", 1);
 	if (colon > 0) {
 		const candidate = resolveAgainst(target.slice(0, colon), cwd);

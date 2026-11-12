@@ -261,6 +261,8 @@ export class Sandbox {
 			}
 			if (args.close_stdin === true) await inv.proc.stdin.end();
 		})();
+		// A write cut short by the kill below rejects later; nothing else waits for it.
+		void io.catch(() => {});
 		await Promise.race([io, abortPromise(signal)]);
 		if (signal.aborted) {
 			inv.proc.kill("SIGKILL");

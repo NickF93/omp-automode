@@ -17,6 +17,8 @@ beforeAll(() => {
 	mkdirSync(path.join(cwd, ".git"), { recursive: true });
 	mkdirSync(outside, { recursive: true });
 	writeFileSync(path.join(cwd, "data.zip"), "zip");
+	// A file literally named "file" must not turn a file:// URL into a member selector.
+	writeFileSync(path.join(cwd, "file"), "x");
 	symlinkSync(outside, path.join(cwd, "link-out"));
 	symlinkSync(path.join(cwd, ".git"), path.join(cwd, "gitlink"));
 });
@@ -172,6 +174,8 @@ describe("write and edit targets", () => {
 		expect(run("write", { path: `file://${path.join(cwd, ".git", "config")}`, content: "x" })).toBe("review");
 		expect(run("write", { path: `file://${path.join(cwd, "src", "ok.ts")}`, content: "x" })).toBe("skip");
 		expect(run("write", { path: "@local://PLAN.md", content: "x" })).toBe("skip");
+		expect(run("write", { path: `file://${path.join(outside, "rc")}`, content: "x" })).toBe("review");
+		expect(run("write", { path: `FILE://${path.join(cwd, ".git", "hooks", "pre-commit")}`, content: "x" })).toBe("review");
 	});
 
 	test("patch-mode renames are targets", () => {

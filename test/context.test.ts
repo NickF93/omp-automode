@@ -264,6 +264,23 @@ describe("whole-request admission", () => {
 		expect(result.evidence.trusted[1]?.text).toBe("latest instruction");
 	});
 
+	test("never shortens the newest user message or an explicit approval, and can be told not to shorten at all", () => {
+		const trusted = [
+			{ source: "user message", text: "a".repeat(8000) },
+			{ source: "user message", text: "b".repeat(2000) },
+			{ source: "explicit approval the user selected in /approve", text: "approved exactly this" },
+		];
+		const base = admit(snapshot({ trusted: trusted.slice(1) }), action, system, tools, model(1_000_000), { imageInput: false });
+		if (!base.ok) throw new Error("base must fit");
+		const window = base.tokens + 256 + 200;
+		expect(admit(snapshot({ trusted }), action, system, tools, model(window), { imageInput: false, shortenTrusted: false }).ok).toBe(false);
+		const result = admit(snapshot({ trusted }), action, system, tools, model(window), { imageInput: false });
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.evidence.trusted[1]?.text).toBe("b".repeat(2000));
+		expect(result.evidence.trusted[2]?.text).toBe("approved exactly this");
+	});
+
 	test("reports an input-budget failure when required evidence cannot fit", () => {
 		const result = admit(snapshot({}), action, system, tools, model(300), { imageInput: false });
 		expect(result.ok).toBe(false);

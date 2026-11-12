@@ -141,9 +141,8 @@ function errorDetail(message: AssistantMessage): string {
 
 interface AttemptCounters {
 	checkpointRestarts: number;
+	/** Model requests, including the transport's internal replays. */
 	samplingRequests: number;
-	/** Completed native attempts reported by the transport, including its internal replays. */
-	nativeAttempts: number;
 }
 
 async function runAttempt(
@@ -167,29 +166,33 @@ async function runAttempt(
 		let needRestart = false;
 		try {
 			for (;;) {
-				// Admit evidence against the cost of the private history; drop the oldest
-				// completed steps whole, but never the newest one.
-				let admission = admit(snapshot, req.action, systemPrompt, INVESTIGATION_TOOLS, req.model, {
-					imageInput,
-					retryReason,
-					omittedSteps,
-				}, historyTokens(groups));
+				// Admit evidence against the cost of the private history. Optional evidence goes
+				// first, then the oldest completed steps (never the newest); only then may older
+				// trusted instructions be shortened.
+				const tryAdmit = (shortenTrusted: boolean) =>
+					admit(
+						snapshot,
+						req.action,
+						systemPrompt,
+						INVESTIGATION_TOOLS,
+						req.model,
+						{ imageInput, retryReason, omittedSteps, shortenTrusted },
+						historyTokens(groups),
+					);
+				let admission = tryAdmit(false);
 				while (!admission.ok && groups.length > 1) {
 					groups.shift();
 					omittedSteps++;
-					admission = admit(snapshot, req.action, systemPrompt, INVESTIGATION_TOOLS, req.model, {
-						imageInput,
-						retryReason,
-						omittedSteps,
-					}, historyTokens(groups));
+					admission = tryAdmit(false);
 				}
+				if (!admission.ok) admission = tryAdmit(true);
 				if (!admission.ok) {
 					if (groups.length === 0) return { kind: "input_budget", detail: admission.reason };
 					needRestart = true;
 					break;
 				}
 				if (signal.aborted) return { kind: "aborted" };
-				counters.samplingRequests++;
+				let nativeAttempts = 0;
 				let response: AssistantMessage;
 				try {
 					response = await completeSimple(
@@ -201,11 +204,12 @@ async function runAttempt(
 							signal,
 							maxHttpAttempts: 1,
 							...(req.effort ? { reasoning: req.effort as Effort } : {}),
-							// Each completed native attempt beyond the first is an extra sampling request.
-							onAttempt: () => counters.nativeAttempts++,
+							// The transport may replay internally; each completed attempt is a sampling request.
+							onAttempt: () => nativeAttempts++,
 						},
 					);
 				} catch (error) {
+					counters.samplingRequests += Math.max(1, nativeAttempts);
 					if (signal.aborted) return { kind: "aborted" };
 					const code = status(error);
 					const message = String((error as Error)?.message ?? error);
@@ -217,6 +221,7 @@ async function runAttempt(
 						retryAfterMs: extractProviderRetryHint(req.model.provider, message),
 					};
 				}
+				counters.samplingRequests += Math.max(1, nativeAttempts);
 				if (response.stopReason === "aborted" || signal.aborted) return { kind: "aborted" };
 				if (response.stopReason === "error") {
 					if (!isContextOverflow(response)) {
@@ -316,13 +321,12 @@ export async function review(req: ReviewRequest): Promise<ReviewResult> {
 	const deadlineController = new AbortController();
 	const timer = setTimeout(() => deadlineController.abort(), req.timeoutMs);
 	const signal = AbortSignal.any([req.signal, deadlineController.signal]);
-	const counters: AttemptCounters = { checkpointRestarts: 0, samplingRequests: 0, nativeAttempts: 0 };
+	const counters: AttemptCounters = { checkpointRestarts: 0, samplingRequests: 0 };
 	let attempts = 0;
 	const stats = (): ReviewStats => ({
 		attempts,
 		checkpointRestarts: counters.checkpointRestarts,
-		// Native replays inside one completion count as extra sampling requests.
-		samplingRequests: Math.max(counters.samplingRequests, counters.nativeAttempts),
+		samplingRequests: counters.samplingRequests,
 		elapsedMs: Date.now() - started,
 	});
 	const ended = (): ReviewResult =>
