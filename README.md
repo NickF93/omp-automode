@@ -94,6 +94,16 @@ review failure; the plugin never substitutes another model.
 The plugin raises OMP's `extensionHandlers.toolCallTimeoutMs` for the current
 session to at least `timeoutMs + 5000` while it is loaded, without saving it.
 
+### Choosing the reviewer model
+
+The main agent is not sandboxed, so the reviewer is the only thing standing
+between the agent and a harmful command. Its decisions are only as good as its
+model: pick a capable model for `model` (or through `/auto-review`) rather than
+the smallest tier of a family. In comparison runs, a small model at low effort
+allowed a cleanup script that also deleted an unrelated archive, while a larger
+model at the same effort read the script and denied it. Low effort on a capable
+model is usually enough.
+
 ## What the reviewer sees
 
 The reviewer gets the exact planned action, your messages and other trusted
