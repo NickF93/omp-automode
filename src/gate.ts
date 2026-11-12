@@ -162,19 +162,26 @@ function gateDevice(input: GateInput, rest: string): GateResult {
 // ---------------------------------------------------------------------------
 
 /** Archive and SQLite selectors address a member of an existing backing file. */
-function backingFile(raw: string, cwd: string): string {
+/**
+ * Every file a target can name: the literal path and, when the text before the
+ * first `:` is an existing file, that file as an archive or database whose member
+ * is addressed. The host decides between them by format, so the gate requires
+ * all interpretations to be local and unprotected.
+ */
+function candidateFiles(raw: string, cwd: string): string[] {
 	// Decode host spellings (file:// URLs, @/ and : prefixes) before looking for a member selector.
 	const target = expandHome(raw);
+	const files = [resolveAgainst(target, cwd)];
 	const colon = target.indexOf(":", 1);
 	if (colon > 0) {
 		const candidate = resolveAgainst(target.slice(0, colon), cwd);
 		try {
-			if (statSync(candidate).isFile()) return candidate;
+			if (statSync(candidate).isFile()) files.push(candidate);
 		} catch {
-			// not an existing file: the whole string is the path
+			// not an existing file: only the literal path applies
 		}
 	}
-	return resolveAgainst(target, cwd);
+	return files;
 }
 
 /** Host path spellings: stray leading `:`, `@/`/`@~` shorthands, `file://` URLs and `~`. */
@@ -221,11 +228,12 @@ export function isLocalUnprotected(target: string, cwd: string): boolean {
 	const scheme = URL_SCHEME_RE.exec(target)?.[1]?.toLowerCase();
 	if (scheme && scheme !== "file") return false;
 	const root = realTarget(path.resolve(cwd));
-	const resolved = realTarget(backingFile(target, cwd));
-	const rel = path.relative(root, resolved);
-	if (rel === "") return true;
-	if (rel.startsWith("..") || path.isAbsolute(rel)) return false;
-	return !rel.split(path.sep).some(part => PROTECTED_COMPONENTS[part]);
+	return candidateFiles(target, cwd).every(file => {
+		const rel = path.relative(root, realTarget(file));
+		if (rel === "") return true;
+		if (rel.startsWith("..") || path.isAbsolute(rel)) return false;
+		return !rel.split(path.sep).some(part => PROTECTED_COMPONENTS[part]);
+	});
 }
 
 function gateLocalTargets(targets: string[] | undefined, cwd: string): GateResult {

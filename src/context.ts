@@ -137,7 +137,7 @@ interface Collected {
 
 const SKILL_PROMPT_TYPE = "skill-prompt";
 /** The host's plan-approved prompt inlines the approved plan text. */
-const APPROVED_PLAN_RE = /^Plan approved\.[\s\S]*?<plan path="([^"]+)">\n([\s\S]*?)\n<\/plan>/;
+const APPROVED_PLAN_RE = /^Plan approved\.[\s\S]*?<plan path="([^"]+)">\n([\s\S]*)\n<\/plan>/;
 
 /** Walk the raw active branch and label every piece of evidence. */
 function collect(branch: readonly RawEntry[], options: CaptureOptions): Collected {
@@ -145,8 +145,8 @@ function collect(branch: readonly RawEntry[], options: CaptureOptions): Collecte
 	const nonUser: TranscriptEntry[] = [];
 	const priorReviews: string[] = [];
 	const askQuestions = new Map<string, string>();
-	/** Adopted plans by path: the host's plan-approved prompt carries the exact approved text, including in-review edits. */
-	const adoptions = new Map<string, TrustedInstruction>();
+	/** The latest adoption entry, until the next message: the host's plan-approved prompt follows it directly. */
+	let pendingAdoption: { path: string; item: TrustedInstruction } | undefined;
 	/** Tool calls by id, so each result joins its call in one entry that is kept or evicted together. */
 	const callEntries = new Map<string, TranscriptEntry>();
 	const pushTool = (label: string, text: string) => {
@@ -167,23 +167,19 @@ function collect(branch: readonly RawEntry[], options: CaptureOptions): Collecte
 						if (text.trim()) trusted.push({ source: "user message", text });
 						pushImages("image attached by the user", images);
 					} else {
-						const approved = APPROVED_PLAN_RE.exec(text);
-						const adoption = approved ? adoptions.get(approved[1] as string) : undefined;
-						if (adoption && approved) {
-							adoption.source = "plan the user approved for implementation in native plan review (written by the agent; exactly as approved; authority limited to its scope)";
-							adoption.text = `${approved[1]}\n${approved[2]}`;
-						}
 						const label = options.isChild ? "task text from the parent agent (untrusted)" : "agent-injected user-role message (untrusted)";
 						nonUser.push({ cls: "commentary", label, text: truncateMiddle(text, ASSISTANT_ENTRY_MAX_TOKENS * BYTES_PER_TOKEN) });
 					}
 					break;
 				}
 				case "developer": {
-					const approved = APPROVED_PLAN_RE.exec(text);
-					const adoption = approved ? adoptions.get(approved[1] as string) : undefined;
-					if (adoption && approved) {
-						adoption.source = "plan the user approved for implementation in native plan review (written by the agent; exactly as approved; authority limited to its scope)";
-						adoption.text = `${approved[1]}\n${approved[2]}`;
+					// Only the host's synthetic prompt that directly follows the adoption entry may
+					// supply the approved text; the pending adoption is consumed by the next message.
+					const approved = msg.synthetic === true ? APPROVED_PLAN_RE.exec(text) : null;
+					if (pendingAdoption && approved && approved[1] === pendingAdoption.path) {
+						pendingAdoption.item.source =
+							"plan the user approved for implementation in native plan review (written by the agent; exactly as approved; authority limited to its scope)";
+						pendingAdoption.item.text = `${approved[1]}\n${approved[2]}`;
 					}
 					// Synthetic developer prompts are harness or extension injections unless a human started them.
 					const human =
@@ -255,7 +251,9 @@ function collect(branch: readonly RawEntry[], options: CaptureOptions): Collecte
 				default:
 					if (text.trim()) pushTool(`${String(msg.role)} message (untrusted)`, text);
 			}
+			pendingAdoption = undefined;
 		} else if (entry.type === "custom_message") {
+			pendingAdoption = undefined;
 			const { text, images } = contentParts(entry.content);
 			const details = isRecord(entry.details) ? entry.details : {};
 			if (entry.customType === SKILL_PROMPT_TYPE && entry.attribution === "user" && !options.isChild) {
@@ -285,7 +283,8 @@ function collect(branch: readonly RawEntry[], options: CaptureOptions): Collecte
 					text: `${data.path}\n${data.content}`,
 				};
 				trusted.push(item);
-				adoptions.set(data.path, item);
+				pendingAdoption = { path: data.path, item };
+				continue;
 			} else if (data.kind === "result" && isRecord(data.action)) {
 				const verdict = isRecord(data.verdict) ? data.verdict : undefined;
 				const summary = verdict
@@ -539,10 +538,11 @@ export function admit(
 	// Last step: shorten older trusted instructions, oldest first. The newest user
 	// message and explicit approvals for this action are never shortened.
 	if (options.shortenTrusted !== false) {
-		const newestUser = evidence.trusted.findLastIndex(t => t.source === "user message");
+		const newestUser = evidence.trusted.findLastIndex(t => t.source.endsWith("user message"));
 		for (let i = 0; i < evidence.trusted.length && current.tokens > ceiling; i++) {
 			const item = evidence.trusted[i] as TrustedInstruction;
-			if (i === newestUser || item.source.startsWith("explicit approval")) continue;
+			const protectedItem = i === newestUser || i === evidence.trusted.length - 1 || item.source.startsWith("explicit approval");
+			if (protectedItem) continue;
 			const original = item.text;
 			let target = estimateTokens(original);
 			while (current.tokens > ceiling && target > MIN_SHORTENED_TOKENS) {

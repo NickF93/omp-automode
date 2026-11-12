@@ -192,6 +192,13 @@ describe("write and edit targets", () => {
 		expect(run("write", { path: "data.zip:inner/file.txt", content: "x" })).toBe("skip");
 	});
 
+	test("a selector-looking path is reviewed if its literal reading escapes cwd or reaches .git", () => {
+		writeFileSync(path.join(cwd, "README.md"), "x");
+		expect(run("write", { path: "README.md:/../../../../../../../../tmp/x", content: "x" })).toBe("review");
+		expect(run("write", { path: "README.md:/../.git/hooks/pre-commit", content: "x" })).toBe("review");
+		expect(run("edit", { path: "README.md:/../.git/hooks/pre-commit", edits: [] })).toBe("review");
+	});
+
 	test("local, agent and proc protocol writes are accepted exemptions", () => {
 		expect(run("write", { path: "local://PLAN.md", content: "x" })).toBe("skip");
 		expect(run("write", { path: "agent://Worker", content: "x" })).toBe("skip");
