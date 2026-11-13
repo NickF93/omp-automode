@@ -15,11 +15,18 @@ model and reasoning effort are configurable.
 - [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) on `PATH`
   for the reviewer's read-only investigations.
 
-## Loading
+## Installing
 
-The package declares its entry in `package.json` (`omp.extensions`). Load it
-for one run with `omp -e /path/to/omp-automode`, or install it as an OMP plugin.
-When the plugin is not loaded, nothing is reviewed.
+```bash
+omp plugin install github:NickF93/omp-automode#v0.1.0
+```
+
+The `#v…` suffix pins a release; without it the default branch is installed.
+`--scope project` is not supported for `github:` installs (OMP installs them for
+the user). Remove it with `omp plugin uninstall omp-automode`, or turn it off
+with `/plugins disable omp-automode`. For one run without installing:
+`omp -e /path/to/omp-automode`. When the plugin is not loaded, nothing is
+reviewed.
 
 ## How a tool call is handled
 
@@ -64,19 +71,45 @@ explain the risk and get your decision.
 
 ## Commands
 
-- `/auto-review`: show the effective reviewer model and effort and where each
-  comes from; change either for this session, or return to the configured
-  defaults. Choices are saved in the session and restored on resume.
-- `/approve`: pick one of the last ten denials on this branch, review the full
+`/auto-review [show|config|on|off|approve|save|reload]`; Tab completes the subcommand.
+
+- `show` (also plain `/auto-review`): whether review is on, the reviewer model
+  and effort, timeout, shell rules, extra policy, policy and template, each with
+  where it comes from (session, project settings, user settings or default),
+  the unsaved session changes and the number of recent denials. Custom policy
+  texts are shown whole.
+- `config`: change the reviewer model, effort, timeout, shell rules (edited as
+  JSON) or extra policy for this session, or clear the session's changes. A
+  value equal to the settings counts as no change.
+- `off`: after you confirm, turn automatic review off for this session and its
+  subagents. Off means off: every tool call runs without review and without
+  shell rules, `forbidden` rules included. The status bar shows
+  `auto-review OFF` in red, and a resumed session that is off says so.
+- `on`: turn it back on.
+- `approve`: pick one of the last ten denials on this branch, review the full
   action and its risk, and confirm to approve one reviewed retry of exactly that
   action. The reviewer still runs, now knowing you approved it; a changed action
   is reviewed normally. Approvals are not restored after a resume or branch
-  change; the denial list is.
+  change; the denial list is. `/approve` is an alias.
+- `save`: after you confirm, write the session's changes to your user plugin
+  settings (the ones `omp plugin config set` writes), so new sessions in every
+  project use them. A value the project settings override stays a session
+  change, and the confirmation says so.
+- `reload`: re-read the settings files now, for example after editing them with
+  `omp plugin config set` or by hand, refresh the status bar and the review
+  deadline, and show the result. Reviews already read the settings on every
+  call; `reload` makes an external edit visible immediately and reports
+  invalid values.
+
+On/off and session changes are kept in the session, restored on resume and
+branch changes, and followed by subagents.
 
 ## Configuration
 
-Settings use OMP's plugin configuration (`omp plugin config set omp-automode
-<key> <value>`), with project overrides in `.omp/plugin-overrides.json`.
+Settings use OMP's plugin configuration: `/auto-review config` then
+`/auto-review save`, or `omp plugin config set omp-automode <key> <value>` in a
+shell (quote JSON values: `'[{"prefix":["git","status"],"decision":"allow"}]'`).
+Project overrides go in `.omp/plugin-overrides.json`.
 
 | Key | Default | Meaning |
 |---|---|---|

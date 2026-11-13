@@ -13,7 +13,7 @@ import { type ChatRequest, type Reply, scriptedModelsYaml, startScriptedModel, s
 const REVIEWER = process.env.REVIEW_MODEL ?? "opencode-go/deepseek-v4.1-flash";
 const REVIEW_EFFORT = process.env.REVIEW_EFFORT ?? "low";
 const PREFIX = process.env.CASE ?? "s";
-const ONLY = new Set((process.env.ONLY ?? "inject,skill,skillinline,revoke,ask,asktimeout,child,select,invalid,sandbox,browser").split(","));
+const ONLY = new Set((process.env.ONLY ?? "inject,skill,skillinline,revoke,ask,asktimeout,child,select,switch,invalid,sandbox,browser").split(","));
 const log = (s: string) => console.error(`[${PREFIX}] ${s}`);
 
 // --- Loopback receiver for egress attempts --------------------------------------
@@ -394,7 +394,7 @@ await guarded("child", async () => {
 	);
 });
 
-// --- select: switch reviewer model/effort via /auto-review; cancel keeps it ------
+// --- select: switch reviewer model/effort via /auto-review config; cancel keeps it
 await guarded("select", async () => {
 	let cancel = false;
 	let menu = 0;
@@ -404,23 +404,22 @@ await guarded("select", async () => {
 		ui: req => {
 			titles.push(`${req.method}:${String(req.title ?? "")}:${JSON.stringify(req.options ?? []).slice(0, 200)}`);
 			if (cancel || req.method !== "select") return undefined;
+			const title = String(req.title ?? "");
 			const options = (req.options as string[]) ?? [];
-			const model = options.find(o => o.includes("scripted/reviewer-b"));
-			if (model) return { value: model };
-			const effort = options.find(o => /^high\b/.test(o));
-			if (effort) return { value: effort };
+			if (title.startsWith("Reviewer model")) return { value: options.find(o => o.includes("scripted/reviewer-b")) };
+			if (title.startsWith("Reviewer effort")) return { value: options.find(o => /^high\b/.test(o)) };
 			// Command menu: first change the model, then the effort.
 			menu++;
-			return { value: options.find(o => (menu === 1 ? /reviewer model/i : /reviewer effort/i).test(o)) };
+			return { value: options.find(o => (menu === 1 ? /^reviewer model/i : /^reviewer effort/i).test(o)) };
 		},
 	});
 	reviewerScript = () => allowVerdict;
 	script = req => (turn(req).user.includes("release check") ? ([bash("echo release-check-ok")][step(req)] ?? done()) : done());
 	await c.start();
-	await c.run("/auto-review");
-	await c.run("/auto-review");
+	await c.run("/auto-review config");
+	await c.run("/auto-review config");
 	cancel = true;
-	await c.run("/auto-review");
+	await c.run("/auto-review config");
 	const before = reviewerRequests.length;
 	await c.run("Run the release check.");
 	const state = await c.client.getState();
@@ -429,6 +428,156 @@ await guarded("select", async () => {
 	const s = report(c, { uiRequests: titles, reviewerRequests: used, mainModel: (state as { model?: { provider?: string; id?: string } }).model, reviewer: "scripted/reviewer-b (selected)" });
 	expect("select:selected-model-and-effort-used", used.length > 0 && used.every(r => r.model === "reviewer-b" && r.effort === "high"), used);
 	expect("select:main-model-unchanged", JSON.stringify(s.mainModel ?? "").includes("main"), s.mainModel);
+});
+
+// --- switch: show, off (rules too), resume, on, config, save, alias -----------
+await guarded("switch", async () => {
+	let configPick = "Shell rules";
+	const ui = (req: Record<string, unknown>) => {
+		const title = String(req.title ?? "");
+		const options = (req.options as string[]) ?? [];
+		if (req.method === "confirm") return { confirmed: true };
+		if (req.method === "select" && title.startsWith("Automatic review for this session")) return { value: options.find(o => o.startsWith(configPick)) };
+		if (req.method === "editor") return { value: '[{"prefix":["echo"],"decision":"allow"}]' };
+		if (req.method === "input") return { value: "120000" };
+		return undefined;
+	};
+	const plugin = { model: "scripted/reviewer-b", effort: "low", rules: [{ prefix: ["rm"], decision: "forbidden" }] };
+	const files = { "victim/a.txt": "keep me unless review is off\n" };
+	const childDispatch: Reply = {
+		calls: [{ name: "task", args: { i: "Delegating", context: "Off check.", tasks: [{ name: "Offchild", task: "CHILD-OFF: write the marker file.", solutionSpace: "one fix: run the command" }] } }],
+	};
+	reviewerScript = () => allowVerdict;
+	script = req => {
+		const t = turn(req);
+		if (t.user.includes("CHILD-OFF")) return [bash("echo child-ran > child.txt")][step(req)] ?? done();
+		if (t.user.includes("cleanup")) return [bash("rm -rf victim")][step(req)] ?? done();
+		if (t.user.includes("plain-off")) return [bash("echo off-run > off.txt")][step(req)] ?? done();
+		if (t.user.includes("plain-on")) return [bash("echo on-run > on.txt")][step(req)] ?? done();
+		if (t.user.includes("plain-saved")) return [bash("echo saved-run")][step(req)] ?? done();
+		if (t.user.includes("subagent-off")) {
+			const dispatched = t.after.flatMap(m => m.tool_calls ?? []).some(x => x.function.name === "task");
+			if (!dispatched) return childDispatch;
+			if (!(toolResults(req).at(-1) ?? "").includes("## Completed")) return { calls: [{ name: "wait", args: { i: "Waiting for subagent" } }] };
+			return done();
+		}
+		return done();
+	};
+	const statuses = (c: Case) =>
+		c.frames.filter(({ frame }) => frame.type === "extension_ui_request" && frame.method === "setStatus").map(({ frame }) => String(frame.statusText ?? ""));
+	const noticesOf = async (c: Case, prompt: string) => {
+		const before = c.notices().length;
+		await c.run(prompt);
+		return c.notices().slice(before).join("\n---\n");
+	};
+	const exists = (c: Case, rel: string) => existsSync(path.join(c.work, rel));
+
+	// Phase 1: on, then off; rules and review stop applying, also for a subagent.
+	const c = make("switch", { extraArgs: ["--mode", "rpc-ui"], plugin, files, ui });
+	await c.start();
+	const show1 = await noticesOf(c, "/auto-review");
+	await c.run("Run the cleanup now.");
+	const victimAfterOn = exists(c, "victim/a.txt");
+	const offNotice = await noticesOf(c, "/auto-review off");
+	const reviewsBeforeOff = reviewerRequests.length;
+	await c.run("Run the cleanup again.");
+	await c.run("Do the plain-off step.");
+	await c.run("Use a subagent: subagent-off.", 900_000);
+	const reviewsDuringOff = reviewerRequests.length - reviewsBeforeOff;
+	const phase1 = {
+		show1,
+		victimAfterOn,
+		firstRm: bashResult(c, "rm -rf victim", 0)?.result,
+		offNotice,
+		offStatus: statuses(c).some(s => s.includes("auto-review OFF")),
+		secondRmError: bashResult(c, "rm -rf victim", 1)?.isError,
+		victimAfterOff: exists(c, "victim/a.txt"),
+		offFile: exists(c, "off.txt"),
+		childFile: exists(c, "child.txt"),
+		reviewsDuringOff,
+	};
+	await c.stop();
+
+	// Phase 2: resume restores off; on, config, save, alias.
+	const r = make("switch", { extraArgs: ["--mode", "rpc-ui", "--continue"], plugin, ui });
+	await r.start();
+	const resumeNotices = r.notices().join("\n");
+	const resumedOff = statuses(r).some(s => s.includes("auto-review OFF"));
+	await r.run("/auto-review on");
+	const onStatus = statuses(r).at(-1);
+	const reviewsBeforeOn = reviewerRequests.length;
+	await r.run("Do the plain-on step.");
+	const reviewsOn = reviewerRequests.length - reviewsBeforeOn;
+	const configRules = await noticesOf(r, "/auto-review config");
+	configPick = "Timeout";
+	const configTimeout = await noticesOf(r, "/auto-review config");
+	const showSession = await noticesOf(r, "/auto-review show");
+	// The project overrides timeoutMs with an empty value: the host merge still lets it win.
+	mkdirSync(path.join(r.work, ".omp"), { recursive: true });
+	writeFileSync(path.join(r.work, ".omp", "plugin-overrides.json"), JSON.stringify({ settings: { "omp-automode": { timeoutMs: "" } } }));
+	const saveNotice = await noticesOf(r, "/auto-review save");
+	const lock = JSON.parse(readFileSync(path.join(r.dir, "home", ".omp", "plugins", "omp-plugins.lock.json"), "utf8")) as {
+		settings: Record<string, Record<string, unknown>>;
+	};
+	const showSaved = await noticesOf(r, "/auto-review show");
+	const reviewsBeforeSaved = reviewerRequests.length;
+	await r.run("Do the plain-saved step.");
+	const reviewsSaved = reviewerRequests.length - reviewsBeforeSaved;
+	// An external edit of the user settings file, then reload.
+	const lockPath = path.join(r.dir, "home", ".omp", "plugins", "omp-plugins.lock.json");
+	const edited = JSON.parse(readFileSync(lockPath, "utf8")) as { settings: Record<string, Record<string, unknown>> };
+	edited.settings["omp-automode"] = { ...edited.settings["omp-automode"], extraPolicy: "External note." };
+	writeFileSync(lockPath, JSON.stringify(edited, null, 2));
+	const reloaded = await noticesOf(r, "/auto-review reload");
+	expect("switch:reload-shows-external-edit", /Extra policy \(from user settings\):\n {2}External note\./.test(reloaded), reloaded);
+	const unknown = await noticesOf(r, "/auto-review of");
+	const alias = await noticesOf(r, "/approve");
+	await r.stop(`${PREFIX}-switch-resume`);
+	const s = report(r, {
+		phase1,
+		resumeNotices,
+		resumedOff,
+		onStatus,
+		reviewsOn,
+		configRules,
+		configTimeout,
+		showSession,
+		saveNotice,
+		saved: lock.settings["omp-automode"],
+		showSaved,
+		savedRun: bashResult(r, "echo saved-run")?.result,
+		reviewsSaved,
+		unknown,
+		alias,
+		reviewer: "scripted/reviewer-b (settings)",
+	});
+	expect("switch:show-lists-sources", /Automatic review: ON/.test(show1) && /Shell rules \(from user settings\):\n {2}forbidden rm/.test(show1) && /Timeout: 90000 ms \(from default\)/.test(show1), show1);
+	expect("switch:forbidden-rule-while-on", victimAfterOn && /forbidden shell rule/.test(phase1.firstRm ?? ""), phase1.firstRm);
+	expect("switch:off-status-red-text", phase1.offStatus && /OFF/.test(offNotice), { offNotice, offStatus: phase1.offStatus });
+	expect("switch:off-skips-rules-and-review", phase1.secondRmError === false && !phase1.victimAfterOff && phase1.offFile && reviewsDuringOff === 0, phase1);
+	expect("switch:off-applies-to-subagent", phase1.childFile && reviewsDuringOff === 0, { childFile: phase1.childFile, reviewsDuringOff });
+	expect("switch:resume-restores-off", resumedOff && /Automatic review is OFF for this session/.test(resumeNotices), { resumedOff, resumeNotices });
+	expect("switch:on-reviews-again", /auto-review scripted\/reviewer-b:low/.test(onStatus ?? "") && reviewsOn > 0 && exists(r, "on.txt"), { onStatus, reviewsOn });
+	expect(
+		"switch:config-session-values",
+		/Shell rules \(from session\):\n {2}allow {5}echo/.test(showSession) && /Timeout: 120000 ms \(from session\)/.test(showSession) && /Session changes: timeoutMs, rules/.test(showSession),
+		showSession,
+	);
+	expect(
+		"switch:save-writes-user-settings",
+		s.saved?.rules === '[{"prefix":["echo"],"decision":"allow"}]' && s.saved?.timeoutMs === "120000" && /Shell rules \(from user settings\)/.test(showSaved),
+		{ saved: s.saved, showSaved },
+	);
+	expect(
+		"switch:save-keeps-project-shadowed-key",
+		/timeoutMs stay session changes because the project settings override them/.test(saveNotice) &&
+			/Timeout: 120000 ms \(from session\)/.test(showSaved) &&
+			/Session changes: timeoutMs \(not saved/.test(showSaved),
+		{ saveNotice, showSaved },
+	);
+	expect("switch:saved-rule-applies", /saved-run/.test(s.savedRun ?? "") && reviewsSaved === 0, { savedRun: s.savedRun, reviewsSaved });
+	expect("switch:unknown-subcommand-usage", /Usage: \/auto-review \[show\|config\|on\|off\|approve\|save\|reload\]/.test(unknown), unknown);
+	expect("switch:approve-alias", /No recent automatic review denials/.test(alias), alias);
 });
 
 // --- invalid: an explicit unknown reviewer model fails, never substitutes -------
