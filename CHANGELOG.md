@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - 2026-11-13
 
 ### Added
 
@@ -76,4 +76,5 @@ run, so the agent can work without per-action approval prompts.
   the only check; choose a capable model.
 - Pinned to OMP 18.19.0 through imports of host internals.
 
+[0.2.0]: https://github.com/NickF93/omp-automode/releases/tag/v0.2.0
 [0.1.0]: https://github.com/NickF93/omp-automode/releases/tag/v0.1.0
