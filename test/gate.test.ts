@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { editTargets, gate, type GateToolInfo, parseWordOnlySequence } from "../src/gate";
+import { editTargets, gate, parseWordOnlySequence } from "../src/gate";
 import type { ShellRule } from "../src/settings";
 
 let root: string;
@@ -21,13 +21,16 @@ beforeAll(() => {
 	writeFileSync(path.join(cwd, "file"), "x");
 	symlinkSync(outside, path.join(cwd, "link-out"));
 	symlinkSync(path.join(cwd, ".git"), path.join(cwd, "gitlink"));
+	// A directory name that starts like a hashline wrapper, pointing outside.
+	symlinkSync(outside, path.join(cwd, "[evil"));
 });
 
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
-const noTools = new Map<string, GateToolInfo>();
-const run = (toolName: string, input: Record<string, unknown>, rules: ShellRule[] = [], tools = noTools) =>
-	gate({ toolName, input, cwd, rules, tools }).kind;
+type ToolInfo = Parameters<typeof gate>[0]["toolInfo"];
+const noTools: ToolInfo = () => undefined;
+const run = (toolName: string, input: Record<string, unknown>, rules: ShellRule[] = [], toolInfo = noTools) =>
+	gate({ toolName, input, cwd, rules, toolInfo }).kind;
 
 describe("word-only shell parsing", () => {
 	test("splits literal sequences on && || ; | and newlines with quote removal", () => {
@@ -93,7 +96,7 @@ describe("shell rules", () => {
 	});
 
 	test("forbidden wins over an overlapping allow in any component", () => {
-		const result = gate({ toolName: "bash", input: { command: "git status; git push origin main" }, cwd, rules, tools: noTools });
+		const result = gate({ toolName: "bash", input: { command: "git status; git push origin main" }, cwd, rules, toolInfo: noTools });
 		expect(result.kind).toBe("forbidden");
 		expect(result.kind === "forbidden" && result.command).toEqual(["git", "push", "origin", "main"]);
 	});
@@ -130,11 +133,12 @@ describe("tool mapping", () => {
 	});
 
 	test("MCP tools skip only with an explicit read-only hint", () => {
-		const tools = new Map<string, GateToolInfo>([
-			["mcp__docs_search", { name: "mcp__docs_search", mcpServerName: "docs", mcpReadOnlyHint: true }],
-			["mcp__docs_write", { name: "mcp__docs_write", mcpServerName: "docs", mcpReadOnlyHint: false }],
-			["mcp__docs_other", { name: "mcp__docs_other", mcpServerName: "docs" }],
-		]);
+		const mcp: Record<string, { mcpServerName: string; mcpReadOnlyHint?: boolean }> = {
+			mcp__docs_search: { mcpServerName: "docs", mcpReadOnlyHint: true },
+			mcp__docs_write: { mcpServerName: "docs", mcpReadOnlyHint: false },
+			mcp__docs_other: { mcpServerName: "docs" },
+		};
+		const tools: ToolInfo = name => mcp[name];
 		expect(run("mcp__docs_search", {}, [], tools)).toBe("skip");
 		expect(run("mcp__docs_write", {}, [], tools)).toBe("review");
 		expect(run("mcp__docs_other", {}, [], tools)).toBe("review");
@@ -166,6 +170,16 @@ describe("write and edit targets", () => {
 		expect(run("write", { path: "[../elsewhere/x.txt#ABCD]", content: "x" })).toBe("review");
 		expect(run("write", { path: "[ssh://host/etc/x]", content: "x" })).toBe("review");
 		expect(run("write", { path: "[src/ok.ts#1A2B]", content: "x" })).toBe("skip");
+	});
+
+	test("a write path is unwrapped once, as the host writes it", () => {
+		// The host writes `[evil/x`, through the symlink `[evil` out of cwd.
+		expect(run("write", { path: "[[evil/x]]", content: "x" })).toBe("review");
+	});
+
+	test("edit header paths are stripped once, as the host's event normalization strips them", () => {
+		expect(editTargets({ input: "[[evil/x]#1A2B]\nPUT 1.=1:\n+x" })).toEqual(["[evil/x]"]);
+		expect(run("edit", { input: "[[evil/x]#1A2B]\nPUT 1.=1:\n+x" })).toBe("review");
 	});
 
 	test("host path shorthands are normalized before containment", () => {
@@ -233,12 +247,11 @@ describe("write and edit targets", () => {
 
 describe("mounted devices", () => {
 	test("device calls get the same gate as the direct call and report the inner tool", () => {
-		expect(gate({ toolName: "write", input: { path: "xd://lsp", content: JSON.stringify({ action: "hover", file: "a.ts" }) }, cwd, rules: [], tools: noTools })).toEqual({
+		expect(gate({ toolName: "write", input: { path: "xd://lsp", content: JSON.stringify({ action: "hover", file: "a.ts" }) }, cwd, rules: [], toolInfo: noTools })).toEqual({
 			kind: "skip",
-			reason: "LSP query",
 			xdInner: "lsp",
 		});
-		const reviewed = gate({ toolName: "write", input: { path: "xd://eval", content: JSON.stringify({ code: "1" }) }, cwd, rules: [], tools: noTools });
+		const reviewed = gate({ toolName: "write", input: { path: "xd://eval", content: JSON.stringify({ code: "1" }) }, cwd, rules: [], toolInfo: noTools });
 		expect(reviewed).toEqual({ kind: "review", xdInner: "eval" });
 	});
 

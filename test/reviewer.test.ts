@@ -130,7 +130,6 @@ function request(over: Partial<ReviewRequest> = {}): ReviewRequest {
 		instructions: "policy",
 		action: action(),
 		capture: () => snapshot(),
-		currentTrust: () => "f",
 		apiKey: "test-key",
 		sessionId: "s:auto-review",
 		signal: new AbortController().signal,
@@ -254,7 +253,7 @@ describe("review attempts", () => {
 				},
 				() => text('{"outcome":"deny","rationale":"user revoked"}'),
 			],
-			{ capture: () => snapshot(fingerprint), currentTrust: () => fingerprint },
+			{ capture: () => snapshot(fingerprint) },
 		);
 		expect(result.kind === "verdict" && result.verdict.outcome).toBe("deny");
 		expect(result.stats.attempts).toBe(2);

@@ -38,11 +38,11 @@ MAIN_MODEL=provider/model MAIN_EFFORT=low REVIEW_EFFORT=low bun test/live/workfl
   preselected risky default, a
   subagent blocked then re-dispatched after the user's answer, `/auto-review config`
   model and effort selection, `/auto-review` show/off/on/config/save with resume
-  and a subagent while off (`switch`), an unknown explicit reviewer, every reviewer
+  and a subagent while off (`switch`), denials with an approved retry, the breaker and invalid settings under a scripted reviewer (`deny`), unasked and injected pushes to a local remote (`push`), an unknown explicit reviewer, every reviewer
   investigation tool under the sandbox, and an injected browser click). The
   main agent's turns come from `scripted-model.ts`, a loopback
   OpenAI-compatible server; OMP, the plugin, the tools and the reviewer model
-  (`REVIEW_MODEL`, except in the `select` and `sandbox` cases) are real. Select
+  (`REVIEW_MODEL`, except in the `select`, `switch`, `deny` and `sandbox` cases) are real. Select
   cases with `ONLY=inject,skill,...`; results go to
   `evidence/live/<CASE>-verdicts.json`. These are scripted-trigger evidence,
   not real-model acceptance.
