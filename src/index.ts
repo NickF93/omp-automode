@@ -13,6 +13,7 @@ import type {
 	ToolCallEventResult,
 } from "@oh-my-pi/pi-coding-agent";
 import { findScopedSettings, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { completions, describeReviewer, parseSubcommand, renderShow, USAGE, valueSource } from "./commands";
 import { captureEvidence, type CaptureOptions, type PlannedAction, type TrustedInstruction } from "./context";
 import { gate, type GateToolInfo } from "./gate";
 import {
@@ -33,16 +34,26 @@ import {
 } from "./policy";
 import { type ReviewResult, review } from "./reviewer";
 import {
+	applyOverrides,
 	type AutoReviewSettings,
 	type EffectiveReviewer,
 	loadSettings,
+	loadSnapshot,
 	type ModelLookup,
 	modelKey,
+	NO_OVERRIDES,
+	OVERRIDE_KEYS,
+	type OverrideKey,
+	parseRules,
+	parseSettings,
+	parseTimeout,
 	releaseHostDeadline,
 	requireHostDeadline,
 	resolveReviewer,
-	type Selection,
+	saveUserSettings,
+	type SessionOverrides,
 	SettingsError,
+	type SettingsSnapshot,
 	supportedEfforts,
 } from "./settings";
 import { type ActionKey, canonicalJson, type ResultEntry, SessionState } from "./state";
@@ -50,22 +61,37 @@ import { type ActionKey, canonicalJson, type ResultEntry, SessionState } from ".
 const STATUS_KEY = "omp-automode";
 
 // ---------------------------------------------------------------------------
-// Root-to-child trusted context. Only real host parent identities link here.
+// Root-to-child lineage. Only real host parent identities link here.
 // ---------------------------------------------------------------------------
+
+/** What a session passes to its subagents: trusted instructions, on/off and session overrides. */
+interface Control {
+	enabled: boolean;
+	overrides: SessionOverrides | undefined;
+}
+
+interface Lineage {
+	trusted: () => TrustedInstruction[];
+	control: () => Control;
+}
 
 /**
  * Agent ids are unique within one root session but two roots in one process
  * may share an id; an ambiguous parent id inherits nothing rather than another
- * root's instructions.
+ * root's instructions or switches.
  */
-const trustedByAgent = new Map<string, Set<() => TrustedInstruction[]>>();
+const lineageByAgent = new Map<string, Set<Lineage>>();
+
+function parentLineage(ctx: ExtensionContext): Lineage | undefined {
+	if (ctx.agent.kind !== "sub" || !ctx.agent.parentId) return undefined;
+	const lineages = lineageByAgent.get(ctx.agent.parentId);
+	if (!lineages || lineages.size !== 1) return undefined;
+	const [lineage] = lineages;
+	return lineage;
+}
 
 function inheritedFor(ctx: ExtensionContext): TrustedInstruction[] {
-	if (ctx.agent.kind !== "sub" || !ctx.agent.parentId) return [];
-	const getters = trustedByAgent.get(ctx.agent.parentId);
-	if (!getters || getters.size !== 1) return [];
-	const [getter] = getters;
-	return getter?.() ?? [];
+	return parentLineage(ctx)?.trusted() ?? [];
 }
 
 // ---------------------------------------------------------------------------
@@ -107,10 +133,6 @@ function modelLookup(ctx: ExtensionContext, pi: ExtensionAPI): ModelLookup {
 	};
 }
 
-function describeReviewer(reviewer: EffectiveReviewer): string {
-	return `${modelKey(reviewer.model)}${reviewer.effort ? `:${reviewer.effort}` : ""} (model from ${reviewer.modelSource}, effort from ${reviewer.effortSource})`;
-}
-
 export default function automode(pi: ExtensionAPI): void {
 	const moduleIdentity = Settings === pi.pi.Settings;
 	const state = new SessionState((customType, data) => pi.appendEntry(customType, data));
@@ -120,7 +142,7 @@ export default function automode(pi: ExtensionAPI): void {
 	let deadlineOwner: string | undefined;
 	let deadlineSettings: Settings | undefined;
 	let agentId: string | undefined;
-	let lineageGetter: (() => TrustedInstruction[]) | undefined;
+	let lineage: Lineage | undefined;
 
 	const captureOptions = (ctx: ExtensionContext, approvals: TrustedInstruction[]): CaptureOptions => ({
 		isChild: ctx.agent.kind === "sub",
@@ -129,39 +151,54 @@ export default function automode(pi: ExtensionAPI): void {
 		approvals,
 	});
 
+	/** A subagent follows its parent's switch and overrides; a root session uses its own. */
+	const control = (ctx: ExtensionContext): Control =>
+		parentLineage(ctx)?.control() ?? { enabled: state.enabled, overrides: state.overrides };
+
+	/** Settings with this session's overrides applied. */
+	const effectiveSettings = async (ctx: ExtensionContext): Promise<AutoReviewSettings> =>
+		applyOverrides(await loadSettings(ctx.cwd), control(ctx).overrides);
+
 	const cancelInflight = () => {
 		for (const controller of inflight) controller.abort();
 		inflight.clear();
 	};
 
 	const showStatus = async (ctx: ExtensionContext) => {
+		const { enabled, overrides } = control(ctx);
+		if (!enabled) {
+			ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("error", "auto-review OFF"));
+			return;
+		}
 		try {
-			const settings = await loadSettings(ctx.cwd);
-			const reviewer = resolveReviewer(settings, state.selection, modelLookup(ctx, pi));
+			const reviewer = resolveReviewer(await loadSettings(ctx.cwd), overrides, modelLookup(ctx, pi));
 			ctx.ui.setStatus(STATUS_KEY, `auto-review ${modelKey(reviewer.model)}${reviewer.effort ? `:${reviewer.effort}` : ""}`);
 		} catch (error) {
 			ctx.ui.setStatus(STATUS_KEY, `auto-review: ${(error as Error).message}`);
 		}
 	};
 
-	/** Raise the host's per-handler budget on this session's scoped Settings before tool dispatch. */
+	/** Raise the host's per-handler budget on this session's scoped Settings to fit a review of `timeoutMs`. */
+	const applyDeadline = (ctx: ExtensionContext, timeoutMs: number) => {
+		const scoped = findScopedSettings();
+		if (!moduleIdentity || !scoped) return;
+		deadlineOwner ??= `${ctx.sessionManager.getSessionId()}:${crypto.randomUUID()}`;
+		if (deadlineSettings && deadlineSettings !== scoped) releaseHostDeadline(deadlineSettings, deadlineOwner);
+		deadlineSettings = scoped;
+		requireHostDeadline(scoped, deadlineOwner, timeoutMs + HOST_TIMEOUT_HEADROOM_MS);
+	};
+
+	/** Before tool dispatch: apply the effective timeout, or say why the deadline cannot be raised. */
 	const ensureDeadline = async (ctx: ExtensionContext) => {
 		if (!moduleIdentity) {
 			ctx.ui.notify("omp-automode: host settings module differs; review deadline above the host default is unavailable", "warning");
 			return;
 		}
-		const scoped = findScopedSettings();
-		if (!scoped) return;
-		let timeoutMs: number;
 		try {
-			timeoutMs = (await loadSettings(ctx.cwd)).timeoutMs;
+			applyDeadline(ctx, (await effectiveSettings(ctx)).timeoutMs);
 		} catch {
-			return;
+			// Invalid settings block every reviewed call with their own reason.
 		}
-		deadlineOwner ??= `${ctx.sessionManager.getSessionId()}:${crypto.randomUUID()}`;
-		if (deadlineSettings && deadlineSettings !== scoped) releaseHostDeadline(deadlineSettings, deadlineOwner);
-		deadlineSettings = scoped;
-		requireHostDeadline(scoped, deadlineOwner, timeoutMs + HOST_TIMEOUT_HEADROOM_MS);
 	};
 
 	const restore = (ctx: ExtensionContext) => {
@@ -173,18 +210,24 @@ export default function automode(pi: ExtensionAPI): void {
 		restore(ctx);
 		const sessionManager = ctx.sessionManager;
 		const snapshotCtx = ctx;
-		if (agentId !== undefined && lineageGetter) trustedByAgent.get(agentId)?.delete(lineageGetter);
+		if (agentId !== undefined && lineage) lineageByAgent.get(agentId)?.delete(lineage);
 		agentId = ctx.agent.id;
-		lineageGetter = () => captureEvidence(sessionManager.getBranch(), captureOptions(snapshotCtx, [])).trusted;
-		const getters = trustedByAgent.get(agentId) ?? new Set();
-		getters.add(lineageGetter);
-		trustedByAgent.set(agentId, getters);
+		lineage = {
+			trusted: () => captureEvidence(sessionManager.getBranch(), captureOptions(snapshotCtx, [])).trusted,
+			control: () => control(snapshotCtx),
+		};
+		const lineages = lineageByAgent.get(agentId) ?? new Set();
+		lineages.add(lineage);
+		lineageByAgent.set(agentId, lineages);
 		await ensureDeadline(ctx);
 		await showStatus(ctx);
+		warnIfOff(ctx);
 	});
 	const onTransition = async (_event: unknown, ctx: ExtensionContext) => {
 		restore(ctx);
+		await ensureDeadline(ctx);
 		await showStatus(ctx);
+		warnIfOff(ctx);
 	};
 	pi.on("session_switch", onTransition);
 	pi.on("session_branch", onTransition);
@@ -194,10 +237,10 @@ export default function automode(pi: ExtensionAPI): void {
 		state.expireLive();
 		if (deadlineSettings && deadlineOwner) releaseHostDeadline(deadlineSettings, deadlineOwner);
 		deadlineSettings = undefined;
-		if (agentId !== undefined && lineageGetter) {
-			const getters = trustedByAgent.get(agentId);
-			getters?.delete(lineageGetter);
-			if (getters?.size === 0) trustedByAgent.delete(agentId);
+		if (agentId !== undefined && lineage) {
+			const lineages = lineageByAgent.get(agentId);
+			lineages?.delete(lineage);
+			if (lineages?.size === 0) lineageByAgent.delete(agentId);
 		}
 	});
 
@@ -238,13 +281,18 @@ export default function automode(pi: ExtensionAPI): void {
 	pi.on("tool_call", async (event, ctx) => handleToolCall(event, ctx));
 
 	async function handleToolCall(event: ToolCallEvent, ctx: ExtensionContext): Promise<ToolCallEventResult | undefined> {
+		const { enabled, overrides } = control(ctx);
+		// Off means off: no rule, gate or review applies until `/auto-review on`.
+		if (!enabled) return undefined;
 		if (state.takeDeviceGated(event.toolCallId, event.toolName)) return undefined;
 		let settings: AutoReviewSettings;
 		try {
-			settings = await loadSettings(ctx.cwd);
+			settings = applyOverrides(await loadSettings(ctx.cwd), overrides);
 		} catch (error) {
 			return { block: true, reason: failureReason(`invalid omp-automode settings: ${(error as Error).message}`) };
 		}
+		// A subagent follows a timeout its parent changed mid-run from its next call on.
+		applyDeadline(ctx, settings.timeoutMs);
 		// Every tool's event input is a JSON object; the typed variants only name known fields.
 		const input = event.input as Record<string, unknown>;
 		const callCwd = event.toolName === "bash" && typeof input.cwd === "string" ? path.resolve(ctx.cwd, input.cwd) : ctx.cwd;
@@ -277,7 +325,7 @@ export default function automode(pi: ExtensionAPI): void {
 			via = `write xd://${decision.xdInner}`;
 			toolInput = JSON.parse(String(input.content)) as Record<string, unknown>;
 		}
-		return runReview(ctx, settings, {
+		return runReview(ctx, settings, overrides, {
 			tool,
 			input: toolInput,
 			cwd: callCwd,
@@ -290,13 +338,14 @@ export default function automode(pi: ExtensionAPI): void {
 	async function runReview(
 		ctx: ExtensionContext,
 		settings: AutoReviewSettings,
+		overrides: SessionOverrides | undefined,
 		call: { tool: string; input: Record<string, unknown>; cwd: string; via?: string; toolCallId: string; toolDescription?: string },
 	): Promise<ToolCallEventResult | undefined> {
 		const sessionId = ctx.sessionManager.getSessionId();
 		const actionKey: ActionKey = { tool: call.tool, input: call.input, cwd: call.cwd, session: sessionId };
 		let reviewer: EffectiveReviewer;
 		try {
-			reviewer = resolveReviewer(settings, state.selection, modelLookup(ctx, pi));
+			reviewer = resolveReviewer(settings, overrides, modelLookup(ctx, pi));
 		} catch (error) {
 			if (error instanceof SettingsError) return { block: true, reason: failureReason(error.message) };
 			throw error;
@@ -431,11 +480,6 @@ export default function automode(pi: ExtensionAPI): void {
 		return undefined;
 	}
 
-	pi.registerCommand("approve", {
-		description: "Approve one reviewed retry of a recently denied action",
-		handler: async (_args, ctx) => approveCommand(ctx),
-	});
-
 	async function approveCommand(ctx: ExtensionCommandContext): Promise<void> {
 		const denials = state.recentDenials();
 		if (denials.length === 0) {
@@ -471,65 +515,298 @@ export default function automode(pi: ExtensionAPI): void {
 	}
 
 	pi.registerCommand("auto-review", {
-		description: "Show or change the automatic reviewer's model and reasoning effort",
-		handler: async (_args, ctx) => autoReviewCommand(ctx),
+		description: "Automatic review: show, config, on, off, approve, save",
+		getArgumentCompletions: completions,
+		handler: async (args, ctx) => autoReviewCommand(args, ctx),
 	});
 
-	async function autoReviewCommand(ctx: ExtensionCommandContext): Promise<void> {
-		let settings: AutoReviewSettings;
+	pi.registerCommand("approve", {
+		description: "Alias of /auto-review approve: approve one reviewed retry of a recently denied action",
+		handler: async (_args, ctx) => approveCommand(ctx),
+	});
+
+	async function autoReviewCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
+		const subcommand = parseSubcommand(args);
+		if (typeof subcommand !== "string") {
+			ctx.ui.notify(subcommand.error, "error");
+			return;
+		}
+		switch (subcommand) {
+			case "show":
+				return showCommand(ctx);
+			case "config":
+				return configCommand(ctx);
+			case "on":
+				return onCommand(ctx);
+			case "off":
+				return offCommand(ctx);
+			case "approve":
+				return approveCommand(ctx);
+			case "save":
+				return saveCommand(ctx);
+			case "reload":
+				// Reviews already read the settings files on every call; this applies an
+				// external edit to the status line and the host deadline now and reports it.
+				await ensureDeadline(ctx);
+				await showStatus(ctx);
+				return showCommand(ctx);
+		}
+	}
+
+	/** A restored or resumed root session that is off says so; its subagents follow it silently. */
+	function warnIfOff(ctx: ExtensionContext): void {
+		if (ctx.agent.kind === "sub" || state.enabled) return;
+		ctx.ui.notify(
+			"Automatic review is OFF for this session: tool calls run without review. /auto-review on turns it back on.",
+			"warning",
+		);
+	}
+
+	async function readSnapshot(ctx: ExtensionContext): Promise<SettingsSnapshot | undefined> {
 		try {
-			settings = await loadSettings(ctx.cwd);
+			return await loadSnapshot(ctx.cwd);
+		} catch (error) {
+			ctx.ui.notify(`Could not read omp-automode settings: ${(error as Error).message}`, "error");
+			return undefined;
+		}
+	}
+
+	async function showCommand(ctx: ExtensionCommandContext): Promise<void> {
+		const snapshot = await readSnapshot(ctx);
+		if (!snapshot) return;
+		const { enabled, overrides } = control(ctx);
+		let settings: AutoReviewSettings | { error: string };
+		let reviewer: string;
+		try {
+			const base = parseSettings(snapshot.raw);
+			settings = applyOverrides(base, overrides);
+			try {
+				reviewer = describeReviewer(resolveReviewer(base, overrides, modelLookup(ctx, pi)), snapshot);
+			} catch (error) {
+				reviewer = `unavailable: ${(error as Error).message}`;
+			}
+		} catch (error) {
+			settings = { error: (error as Error).message };
+			reviewer = "unavailable: the settings are invalid";
+		}
+		ctx.ui.notify(
+			renderShow({ enabled, settings, reviewer, overrides, snapshot, recentDenials: state.recentDenials().length }),
+			enabled ? "info" : "warning",
+		);
+	}
+
+	async function configCommand(ctx: ExtensionCommandContext): Promise<void> {
+		if (!ctx.hasUI) {
+			ctx.ui.notify("/auto-review config needs interactive dialogs; use omp plugin config set omp-automode <key> <value>.", "error");
+			return;
+		}
+		const snapshot = await readSnapshot(ctx);
+		if (!snapshot) return;
+		let base: AutoReviewSettings;
+		try {
+			base = parseSettings(snapshot.raw);
 		} catch (error) {
 			ctx.ui.notify(`omp-automode settings are invalid: ${(error as Error).message}`, "error");
 			return;
 		}
 		const lookupModels = modelLookup(ctx, pi);
-		let effective: string;
+		const effective = applyOverrides(base, state.overrides);
+		const from = (key: OverrideKey) => valueSource(key, state.overrides, snapshot);
 		let current: EffectiveReviewer | undefined;
+		let reviewerText: string;
 		try {
-			current = resolveReviewer(settings, state.selection, lookupModels);
-			effective = describeReviewer(current);
+			current = resolveReviewer(base, state.overrides, lookupModels);
+			reviewerText = describeReviewer(current, snapshot);
 		} catch (error) {
-			effective = `unavailable: ${(error as Error).message}`;
+			reviewerText = `unavailable: ${(error as Error).message}`;
 		}
-		if (!ctx.hasUI) {
-			ctx.ui.notify(`Automatic review: ${effective}`, "info");
-			return;
+		const options: { key: OverrideKey | "reset"; label: string }[] = [
+			{
+				key: "model",
+				label: `Reviewer model: ${current ? modelKey(current.model) : "unavailable"} (from ${current?.modelSource === "session-model" ? "session model" : from("model")})`,
+			},
+			{ key: "effort", label: `Reviewer effort: ${current?.effort ?? "model default"}` },
+			{ key: "timeoutMs", label: `Timeout: ${effective.timeoutMs} ms (from ${from("timeoutMs")})` },
+			{ key: "rules", label: `Shell rules: ${effective.rules.length} (from ${from("rules")})` },
+			{ key: "extraPolicy", label: `Extra policy: ${effective.extraPolicy ? "set" : "none"} (from ${from("extraPolicy")})` },
+			{ key: "reset", label: "Clear this session's changes" },
+		];
+		const picked = await ctx.ui.select(
+			`Automatic review for this session: ${reviewerText}`,
+			options.map(o => o.label),
+		);
+		const key = options.find(o => o.label === picked)?.key;
+		if (!key) return;
+		const next: SessionOverrides = { ...(key === "reset" ? NO_OVERRIDES : (state.overrides ?? NO_OVERRIDES)) };
+		switch (key) {
+			case "reset":
+				break;
+			case "model": {
+				const inherit = "Inherit (settings, else the session model)";
+				const choice = await ctx.ui.select("Reviewer model", [inherit, ...lookupModels.list().map(modelKey)]);
+				if (choice === undefined) return;
+				next.model = choice === inherit || choice === base.model ? null : choice;
+				break;
+			}
+			case "effort": {
+				if (!current) {
+					ctx.ui.notify("Choose an available reviewer model first.", "warning");
+					return;
+				}
+				const inherit = "Inherit (settings, else default)";
+				const choice = await ctx.ui.select(`Reviewer effort for ${modelKey(current.model)}`, [
+					inherit,
+					...supportedEfforts(current.model),
+				]);
+				if (choice === undefined) return;
+				next.effort = choice === inherit || choice === base.effort ? null : choice;
+				break;
+			}
+			case "timeoutMs": {
+				const text = await ctx.ui.input(
+					`Review timeout in milliseconds (now ${effective.timeoutMs}; empty uses the settings: ${base.timeoutMs})`,
+					String(effective.timeoutMs),
+				);
+				if (text === undefined) return;
+				try {
+					const ms = parseTimeout(text.trim());
+					next.timeoutMs = ms === undefined || ms === base.timeoutMs ? null : ms;
+				} catch (error) {
+					ctx.ui.notify(`Not changed: ${(error as Error).message}`, "error");
+					return;
+				}
+				break;
+			}
+			case "rules": {
+				const text = await ctx.ui.editor(
+					'Shell rules: a JSON array of {"prefix": ["git", "status"], "decision": "allow" | "forbidden"}. Empty text uses the settings.',
+					JSON.stringify(effective.rules, null, 2),
+				);
+				if (text === undefined) return;
+				if (text.trim() === "") {
+					next.rules = null;
+					break;
+				}
+				try {
+					const rules = parseRules(JSON.parse(text) as unknown);
+					next.rules = canonicalJson(rules) === canonicalJson(base.rules) ? null : rules;
+				} catch (error) {
+					const message = error instanceof SyntaxError ? `not valid JSON (${error.message})` : (error as Error).message;
+					ctx.ui.notify(`Not changed: ${message}`, "error");
+					return;
+				}
+				break;
+			}
+			case "extraPolicy": {
+				const text = await ctx.ui.editor(
+					"Extra policy, added after the security policy. Clear the text for none.",
+					effective.extraPolicy ?? "",
+				);
+				if (text === undefined) return;
+				const trimmed = text.trim();
+				next.extraPolicy = trimmed === (base.extraPolicy ?? "").trim() ? null : trimmed;
+				break;
+			}
 		}
-		const changeModel = "Change reviewer model";
-		const changeEffort = "Change reviewer effort";
-		const reset = "Inherit both (clear this session's choice)";
-		const action = await ctx.ui.select(`Automatic review: ${effective}`, [changeModel, changeEffort, reset]);
-		if (action === undefined) return;
-		let next: Selection = { model: state.selection?.model ?? null, effort: state.selection?.effort ?? null };
-		if (action === reset) {
-			next = { model: null, effort: null };
-		} else if (action === changeModel) {
-			const inherit = "Inherit (settings, else the session model)";
-			const keys = lookupModels.list().map(modelKey);
-			const picked = await ctx.ui.select("Reviewer model", [inherit, ...keys]);
-			if (picked === undefined) return;
-			next.model = picked === inherit ? null : picked;
-		} else {
-			const model = current?.model;
-			if (!model) {
-				ctx.ui.notify("Choose an available reviewer model first.", "warning");
+		if (key === "model" || key === "effort") {
+			try {
+				resolveReviewer(base, next, lookupModels);
+			} catch (error) {
+				ctx.ui.notify(`Not changed: ${(error as Error).message}`, "error");
 				return;
 			}
-			const inherit = "Inherit (settings, else default)";
-			const picked = await ctx.ui.select(`Reviewer effort for ${modelKey(model)}`, [inherit, ...supportedEfforts(model)]);
-			if (picked === undefined) return;
-			next.effort = picked === inherit ? null : picked;
 		}
-		try {
-			resolveReviewer(settings, next.model || next.effort ? next : undefined, lookupModels);
-		} catch (error) {
-			ctx.ui.notify(`Not changed: ${(error as Error).message}`, "error");
-			return;
-		}
-		state.setSelection(next.model || next.effort ? next : undefined);
+		state.setOverrides(next);
+		await ensureDeadline(ctx);
 		await showStatus(ctx);
-		ctx.ui.notify(`Automatic review now uses ${describeReviewer(resolveReviewer(settings, state.selection, lookupModels))}`, "info");
+		const changed = OVERRIDE_KEYS.filter(k => state.overrides && state.overrides[k] !== null);
+		ctx.ui.notify(
+			changed.length
+				? `This session now overrides: ${changed.join(", ")}. /auto-review show lists the configuration; /auto-review save keeps the changes.`
+				: "This session uses the settings again.",
+			"info",
+		);
 	}
 
+	async function onCommand(ctx: ExtensionCommandContext): Promise<void> {
+		if (state.enabled) {
+			ctx.ui.notify("Automatic review is already on.", "info");
+			return;
+		}
+		state.setEnabled(true);
+		await ensureDeadline(ctx);
+		await showStatus(ctx);
+		ctx.ui.notify("Automatic review is ON for this session.", "info");
+	}
+
+	async function offCommand(ctx: ExtensionCommandContext): Promise<void> {
+		if (!state.enabled) {
+			ctx.ui.notify("Automatic review is already off for this session. /auto-review on turns it back on.", "warning");
+			return;
+		}
+		if (!ctx.hasUI) {
+			ctx.ui.notify("/auto-review off needs an interactive confirmation.", "error");
+			return;
+		}
+		// A select, not a confirm: the first, preselected choice keeps review on, so a stray Enter is harmless.
+		const keep = "Keep automatic review on";
+		const turnOff = "Turn automatic review OFF for this session";
+		const choice = await ctx.ui.select(
+			"Turn automatic review OFF? Every tool call of this session and its subagents will run without review and without your shell rules, forbidden rules included, until /auto-review on. The choice is kept in the session and restored when you resume it.",
+			[keep, turnOff],
+		);
+		if (choice !== turnOff) return;
+		state.setEnabled(false);
+		await showStatus(ctx);
+		ctx.ui.notify(
+			"Automatic review is OFF for this session: tool calls run without review. /auto-review on turns it back on.",
+			"warning",
+		);
+	}
+
+	async function saveCommand(ctx: ExtensionCommandContext): Promise<void> {
+		const overrides = state.overrides;
+		if (!overrides) {
+			ctx.ui.notify("No session changes to save; /auto-review config makes them.", "info");
+			return;
+		}
+		if (!ctx.hasUI) {
+			ctx.ui.notify("/auto-review save needs an interactive confirmation.", "error");
+			return;
+		}
+		const snapshot = await readSnapshot(ctx);
+		if (!snapshot) return;
+		const keys = OVERRIDE_KEYS.filter(key => overrides[key] !== null);
+		// Any project entry overrides the user value in the host's merge, even an empty one.
+		const shadowed = keys.filter(key => snapshot.projectKeys.has(key));
+		const describe = (key: OverrideKey) =>
+			key === "extraPolicy" && !overrides.extraPolicy ? "(none: the setting is removed)" : JSON.stringify(overrides[key]);
+		const body = [
+			"These values are written to your user plugin settings, the ones `omp plugin config set` writes, and apply to new sessions in every project:",
+			"",
+			...keys.map(key => `${key}: ${describe(key)}`),
+			...(shadowed.length
+				? ["", `The project settings (${snapshot.projectPath}) override ${shadowed.join(", ")}; those stay session changes.`]
+				: []),
+		].join("\n");
+		if (!(await ctx.ui.confirm("Save this session's changes?", body))) return;
+		const written: OverrideKey[] = [];
+		try {
+			await saveUserSettings(Object.fromEntries(keys.map(key => [key, overrides[key]])), written);
+		} catch (error) {
+			ctx.ui.notify(
+				`${written.length ? `Saved only ${written.join(", ")}; the rest was not saved` : "Not saved"}: ${(error as Error).message}. The session changes are kept.`,
+				"error",
+			);
+			return;
+		}
+		state.setOverrides({ ...NO_OVERRIDES, ...Object.fromEntries(shadowed.map(key => [key, overrides[key]])) });
+		await showStatus(ctx);
+		ctx.ui.notify(
+			`Saved ${keys.join(", ")} to your user plugin settings.${
+				shadowed.length ? ` ${shadowed.join(", ")} stay session changes because the project settings override them.` : ""
+			}`,
+			"info",
+		);
+	}
 }

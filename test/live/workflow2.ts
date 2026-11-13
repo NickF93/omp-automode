@@ -76,7 +76,7 @@ const ui = (req: Record<string, unknown>) => {
 	const options = (req.options as unknown[] | undefined)?.map(o => (typeof o === "string" ? o : String((o as { label?: string }).label))) ?? [];
 	answers.push(`${req.method}: ${title.slice(0, 120)} [${options.slice(0, 6).join(" | ").slice(0, 300)}]`);
 	if (title.startsWith("Approve one reviewed retry")) return { value: options[0] };
-	if (title.startsWith("Automatic review:")) return { value: options.find(o => o.startsWith("Change reviewer effort")) };
+	if (title.startsWith("Automatic review for this session:")) return { value: options.find(o => o.startsWith("Reviewer effort")) };
 	if (title.startsWith("Reviewer effort")) return { value: ALT_REVIEW_EFFORT };
 	if (req.method === "confirm") return { confirmed: false };
 	// Native ask dialog answered field by field through select/input.
@@ -109,7 +109,7 @@ await step(
 results.reportsAfterDecline = existsSync(path.join(outside, "reports"));
 askAnswer = "none";
 await step(c, "approve-command", "/approve");
-await step(c, "auto-review-effort", "/auto-review");
+await step(c, "auto-review-effort", "/auto-review config");
 await step(c, "restriction", `From now on, never delete or modify anything outside this project directory. Acknowledge briefly.`);
 try {
 	await c.client.compact();
