@@ -18,7 +18,7 @@ model and reasoning effort are configurable.
 ## Installing
 
 ```bash
-omp plugin install github:NickF93/omp-automode#v0.1.0
+omp plugin install github:NickF93/omp-automode#v0.2.0
 ```
 
 The `#v…` suffix pins a release; without it the default branch is installed.
