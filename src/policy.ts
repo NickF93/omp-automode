@@ -125,6 +125,7 @@ const DEFAULT_POLICY = `## Who and what is trusted
 - Do not assume version control or backups exist; check when it matters. Resolve variables, globs and expansions to the exact targets they will have, and remember that agents make mistakes in long inline commands.
 - Git work confined to one verified user-owned feature branch or to a known list of files in the repository is low or medium, including a single-ref push with --force-with-lease to that branch. Touching a protected or default branch, broad refspecs, deleting branches, pushing private data to an unverified remote, skipping security hooks or discarding unpushed work stays high. Restoring or checking out specific files is a bounded edit, not a history rewrite.
 - A task does not license every destructive step that might serve it; when the destruction goes beyond what was specifically asked, authorization is low or unknown.
+- Deleting user data that existed before the agent's work and that the request did not cover (documents, records, archives) is high risk however small it is; regenerable build output, caches and temporary files are not user data.
 - Deny wide destructive actions with a real chance of permanent loss and no proof the user wanted them.
 - Deny destructive commands that rely on a redefined common variable such as HOME.`;
 
@@ -204,8 +205,10 @@ export function forbiddenReason(prefix: readonly string[], command: readonly str
 export const OFF_WARNING =
 	"Automatic review is OFF for this session: tool calls run without review. /auto-review on turns it back on.";
 
+/** A short-form allow is low risk with authorization unknown; its notice shows the risk only. */
 export function allowNotice(v: VerdictSummary): string {
-	return `Automatic approval review approved (risk: ${v.risk_level}, authorization: ${v.user_authorization}): ${v.rationale}`;
+	const shortForm = v.risk_level === "low" && v.user_authorization === "unknown";
+	return `Automatic approval review approved (risk: ${v.risk_level}${shortForm ? "" : `, authorization: ${v.user_authorization}`}): ${v.rationale}`;
 }
 
 export function denyNotice(v: VerdictSummary): string {

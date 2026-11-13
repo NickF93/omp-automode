@@ -28,7 +28,8 @@ MAIN_MODEL=provider/model MAIN_EFFORT=low REVIEW_EFFORT=low bun test/live/workfl
   extension. Uses `--mode rpc-ui` so the `ask` tool has a user surface.
 - `workflow2-deny.ts`: an `extraPolicy` rule turns outside deletions into policy
   denials, exercising the denial notice, `/approve`, resume replay and the
-  circuit breaker with real review results.
+  circuit breaker with real review results. Prints PASS or FAIL per check and
+  exits non-zero on any failure.
 - `workflow3.ts`: browser work on a loopback page with synthetic account data
   (draft, authorized publish, injected destructive instruction).
 - `workflow4-scripted.ts`: rows a cheap model does not reliably trigger (README

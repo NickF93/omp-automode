@@ -145,6 +145,12 @@ async function runAttempt(
 	const snapshot = req.capture();
 	const systemPrompt = [req.instructions];
 	const imageInput = req.model.input.includes("image");
+	// A request silent for half the review time is stalled: fail it as transient so the next
+	// attempt still has time. Models whose catalog entry declares its own stream budget are
+	// known to stay silent longer while reasoning; they keep that budget.
+	const compat = req.model.compat as { streamIdleTimeoutMs?: number; streamFirstEventTimeoutMs?: number } | undefined;
+	const stallMs =
+		compat?.streamIdleTimeoutMs !== undefined || compat?.streamFirstEventTimeoutMs !== undefined ? undefined : Math.floor(req.timeoutMs / 2);
 	let restarted = false;
 
 	for (;;) {
@@ -193,6 +199,7 @@ async function runAttempt(
 							sessionId: req.sessionId,
 							signal,
 							maxHttpAttempts: 1,
+							...(stallMs === undefined ? {} : { streamFirstEventTimeoutMs: stallMs, streamIdleTimeoutMs: stallMs }),
 							...(req.effort ? { reasoning: req.effort as Effort } : {}),
 							// The transport may replay internally; each completed attempt is a sampling request.
 							onAttempt: () => nativeAttempts++,
