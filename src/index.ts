@@ -748,11 +748,14 @@ export default function automode(pi: ExtensionAPI): void {
 			ctx.ui.notify("/auto-review off needs an interactive confirmation.", "error");
 			return;
 		}
-		const confirmed = await ctx.ui.confirm(
-			"Turn automatic review OFF for this session?",
-			"Every tool call of this session and its subagents will run without review and without your shell rules, forbidden rules included, until /auto-review on.\n\nThe choice is kept in the session and restored when you resume it.",
+		// A select, not a confirm: the first, preselected choice keeps review on, so a stray Enter is harmless.
+		const keep = "Keep automatic review on";
+		const turnOff = "Turn automatic review OFF for this session";
+		const choice = await ctx.ui.select(
+			"Turn automatic review OFF? Every tool call of this session and its subagents will run without review and without your shell rules, forbidden rules included, until /auto-review on. The choice is kept in the session and restored when you resume it.",
+			[keep, turnOff],
 		);
-		if (!confirmed) return;
+		if (choice !== turnOff) return;
 		state.setEnabled(false);
 		await showStatus(ctx);
 		ctx.ui.notify(

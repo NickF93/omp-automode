@@ -161,8 +161,9 @@ review fails rather than running anything unsandboxed.
 - Calls the plugin skips (see the table) are not reviewed.
 - If another extension rewrites a tool's input after this plugin has reviewed
   it, the rewritten input runs.
-- Imports of host internals (`config/settings`, `config/registry`,
-  `extensibility/plugins`, `@oh-my-pi/pi-ai/error`) are pinned to OMP 18.19.0.
+- Imports of host internals (`config`, `config/settings`, `config/registry`,
+  `extensibility/plugins` including `PluginManager` for `/auto-review save`,
+  `@oh-my-pi/pi-ai/error`) are pinned to OMP 18.19.0.
 
 ## Development
 

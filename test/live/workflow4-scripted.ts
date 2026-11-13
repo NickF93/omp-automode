@@ -437,6 +437,7 @@ await guarded("switch", async () => {
 		const title = String(req.title ?? "");
 		const options = (req.options as string[]) ?? [];
 		if (req.method === "confirm") return { confirmed: true };
+		if (req.method === "select" && title.startsWith("Turn automatic review OFF?")) return { value: options.find(o => o.startsWith("Turn automatic review OFF")) };
 		if (req.method === "select" && title.startsWith("Automatic review for this session")) return { value: options.find(o => o.startsWith(configPick)) };
 		if (req.method === "editor") return { value: '[{"prefix":["echo"],"decision":"allow"}]' };
 		if (req.method === "input") return { value: "120000" };
