@@ -3,6 +3,7 @@
 // The child reaches credentials only through the temporary loopback broker,
 // with the bearer read by a native `!cat` reference; no secret is passed in
 // argv or environment, and evidence is scanned in memory before it is written.
+// Runs whose models are all scripted loopback models need no broker.
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import { type RpcAgentProcess, RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
@@ -16,9 +17,9 @@ function required(name: string): string {
 /** Writable task directory holding cases and evidence. */
 export const TASK = path.resolve(required("AUTOMODE_LIVE_DIR"));
 export const TARGET = path.resolve(import.meta.dir, "../..");
-const TOKEN_FILE = path.resolve(required("AUTOMODE_LIVE_BROKER_TOKEN_FILE"));
-const BROKER_URL = required("AUTOMODE_LIVE_BROKER_URL");
-const SECRET = readFileSync(TOKEN_FILE, "utf8").trim();
+const BROKER_URL = process.env.AUTOMODE_LIVE_BROKER_URL;
+const TOKEN_FILE = BROKER_URL ? path.resolve(required("AUTOMODE_LIVE_BROKER_TOKEN_FILE")) : undefined;
+const SECRET = TOKEN_FILE ? readFileSync(TOKEN_FILE, "utf8").trim() : "";
 
 export interface Frame {
 	t: number;
@@ -71,7 +72,7 @@ export class Case {
 		chmodSync(this.dir, 0o700);
 		writeFileSync(
 			path.join(this.dir, "agent", "config.yml"),
-			`auth:\n  broker:\n    url: ${BROKER_URL}\n    token: "!cat '${TOKEN_FILE}'"\n${this.opts.config ?? ""}`,
+			`${BROKER_URL ? `auth:\n  broker:\n    url: ${BROKER_URL}\n    token: "!cat '${TOKEN_FILE}'"\n` : ""}${this.opts.config ?? ""}`,
 			{ mode: 0o600 },
 		);
 		if (this.opts.models) writeFileSync(path.join(this.dir, "agent", "models.yml"), this.opts.models, { mode: 0o600 });

@@ -80,27 +80,54 @@ describe("circuit breaker", () => {
 });
 
 describe("session state replay", () => {
-	test("replay restores the latest selection and recent denials of the branch, never grants", () => {
+	test("replay restores the latest overrides, the on/off switch and recent denials of the branch, never grants", () => {
 		const { state, entries } = recorder();
-		state.setSelection({ model: "p/a", effort: "high" });
+		const overrides = {
+			model: "p/a",
+			effort: "high",
+			timeoutMs: 120_000,
+			rules: [{ prefix: ["git", "status"], decision: "allow" as const }],
+			extraPolicy: "",
+		};
+		state.setOverrides(overrides);
+		state.setEnabled(false);
 		state.recordResult(result("d1", action(1), deny));
 		state.recordResult(result("t1", action(2)));
 		state.grant("denial_retry", action(1), "leaf", state.recentDenials()[0]);
 
 		const resumed = new SessionState(() => {});
 		resumed.replay(entries);
-		expect(resumed.selection).toEqual({ model: "p/a", effort: "high" });
+		expect(resumed.overrides).toEqual(overrides);
+		expect(resumed.enabled).toBe(false);
 		expect(resumed.recentDenials().map(d => d.id)).toEqual(["d1"]);
 		expect(resumed.claim("denial_retry", action(1), "call-x")).toBeUndefined();
 	});
 
-	test("a cleared selection replays as inherit", () => {
+	test("turning review back on replays as on, and a branch without a switch entry is on", () => {
 		const { state, entries } = recorder();
-		state.setSelection({ model: "p/a", effort: null });
-		state.setSelection(undefined);
+		state.setEnabled(false);
+		state.setEnabled(true);
 		const resumed = new SessionState(() => {});
 		resumed.replay(entries);
-		expect(resumed.selection).toBeUndefined();
+		expect(resumed.enabled).toBe(true);
+		resumed.setEnabled(false);
+		resumed.replay([]);
+		expect(resumed.enabled).toBe(true);
+	});
+
+	test("a cleared override replays as inherit", () => {
+		const { state, entries } = recorder();
+		state.setOverrides({ model: "p/a", effort: null, timeoutMs: null, rules: null, extraPolicy: null });
+		state.setOverrides(undefined);
+		const resumed = new SessionState(() => {});
+		resumed.replay(entries);
+		expect(resumed.overrides).toBeUndefined();
+	});
+
+	test("a model and effort selection written by 0.1.0 still restores", () => {
+		const resumed = new SessionState(() => {});
+		resumed.replay([{ type: "custom", customType: ENTRY_TYPE, data: { v: 1, kind: "selection", model: "p/a", effort: "low" } }]);
+		expect(resumed.overrides).toEqual({ model: "p/a", effort: "low", timeoutMs: null, rules: null, extraPolicy: null });
 	});
 
 	test("only the latest ten denial events are offered, newest first, without collapsing repeats", () => {
@@ -114,13 +141,24 @@ describe("session state replay", () => {
 
 	test("malformed persisted entries are ignored", () => {
 		const resumed = new SessionState(() => {});
+		const selection = (extra: Record<string, unknown>) => ({
+			type: "custom",
+			customType: ENTRY_TYPE,
+			data: { v: 1, kind: "selection", model: "p/x", effort: null, ...extra },
+		});
 		resumed.replay([
 			{ type: "custom", customType: ENTRY_TYPE, data: { v: 1, kind: "result", id: "x", verdict: { outcome: "deny" } } },
 			{ type: "custom", customType: ENTRY_TYPE, data: "garbage" },
 			{ type: "custom", customType: "other", data: { v: 1, kind: "selection", model: "p/x", effort: null } },
+			{ type: "custom", customType: ENTRY_TYPE, data: { v: 1, kind: "enabled", enabled: "no" } },
+			selection({ rules: [{ prefix: [], decision: "allow" }] }),
+			selection({ rules: '[{"prefix":["ls"],"decision":"allow"}]' }),
+			selection({ timeoutMs: -1 }),
+			selection({ timeoutMs: "90000" }),
 		]);
 		expect(resumed.recentDenials()).toEqual([]);
-		expect(resumed.selection).toBeUndefined();
+		expect(resumed.overrides).toBeUndefined();
+		expect(resumed.enabled).toBe(true);
 	});
 });
 

@@ -1,10 +1,11 @@
 /**
- * Per-session review state: selection, recent denials, one-use grants,
- * circuit breaker, and the persisted replay union.
+ * Per-session review state: on/off, session overrides, recent denials,
+ * one-use grants, circuit breaker, and the persisted replay union.
  *
- * Persisted entries restore only the reviewer selection and recent denials of
- * the active branch. Grants are live, in-memory, one-use claims and are never
- * restored, so a crash or replay cannot resurrect a permission.
+ * Persisted entries restore only the on/off switch, the session overrides and
+ * recent denials of the active branch. Grants are live, in-memory, one-use
+ * claims and are never restored, so a crash or replay cannot resurrect a
+ * permission.
  */
 import {
 	APPROVE_HISTORY,
@@ -12,7 +13,7 @@ import {
 	BREAKER_WINDOW,
 	BREAKER_WINDOW_DENIALS,
 } from "./policy";
-import type { Selection } from "./settings";
+import { hasOverrides, parseRules, parseTimeout, type SessionOverrides, type ShellRule } from "./settings";
 
 export const ENTRY_TYPE = "omp-automode";
 const ENTRY_VERSION = 1;
@@ -52,11 +53,22 @@ export interface ResultEntry {
 	elapsedMs: number;
 }
 
+/** Session overrides; entries written before 0.2.0 carry only model and effort. */
 export interface SelectionEntry {
 	v: 1;
 	kind: "selection";
 	model: string | null;
 	effort: string | null;
+	timeoutMs?: number | null;
+	rules?: ShellRule[] | null;
+	extraPolicy?: string | null;
+}
+
+/** `/auto-review on|off` for this session. */
+export interface EnabledEntry {
+	v: 1;
+	kind: "enabled";
+	enabled: boolean;
 }
 
 export type ApprovalKind = "denial_retry" | "input_budget";
@@ -91,7 +103,13 @@ export interface PlanAdoptionEntry {
 	fromFile: boolean;
 }
 
-export type PersistedEntry = ResultEntry | SelectionEntry | ApprovalEntry | ConsumedEntry | PlanAdoptionEntry;
+export type PersistedEntry =
+	| ResultEntry
+	| SelectionEntry
+	| EnabledEntry
+	| ApprovalEntry
+	| ConsumedEntry
+	| PlanAdoptionEntry;
 
 /** A completed policy denial offered by `/approve`. */
 export interface DenialEvent {
@@ -193,12 +211,35 @@ function parseAction(value: unknown): ActionKey | undefined {
 	return { tool, input, cwd, session };
 }
 
-/** Restorable facts from one persisted entry; anything malformed is ignored. */
-function restorable(data: unknown): { selection: Selection | null } | { denial: DenialEvent } | undefined {
-	if (!isRecord(data) || data.v !== ENTRY_VERSION) return undefined;
-	if (data.kind === "selection" && optionalString(data.model) && optionalString(data.effort)) {
-		return { selection: data.model === null && data.effort === null ? null : { model: data.model, effort: data.effort } };
+/** Session overrides from a selection entry; malformed fields reject the whole entry. */
+function parseOverrides(data: Record<string, unknown>): SessionOverrides | undefined {
+	const { model, effort, timeoutMs = null, rules = null, extraPolicy = null } = data;
+	if (!optionalString(model) || !optionalString(effort) || !optionalString(extraPolicy)) return undefined;
+	if (rules !== null && !Array.isArray(rules)) return undefined;
+	if (timeoutMs !== null && typeof timeoutMs !== "number") return undefined;
+	try {
+		return {
+			model,
+			effort,
+			extraPolicy,
+			timeoutMs: timeoutMs === null ? null : (parseTimeout(timeoutMs) ?? null),
+			rules: rules === null ? null : parseRules(rules),
+		};
+	} catch {
+		return undefined;
 	}
+}
+
+type Restorable = { overrides: SessionOverrides } | { enabled: boolean } | { denial: DenialEvent };
+
+/** Restorable facts from one persisted entry; anything malformed is ignored. */
+function restorable(data: unknown): Restorable | undefined {
+	if (!isRecord(data) || data.v !== ENTRY_VERSION) return undefined;
+	if (data.kind === "selection") {
+		const overrides = parseOverrides(data);
+		return overrides ? { overrides } : undefined;
+	}
+	if (data.kind === "enabled" && typeof data.enabled === "boolean") return { enabled: data.enabled };
 	if (data.kind === "result" && typeof data.id === "string") {
 		const verdict = parseVerdict(data.verdict);
 		const action = parseAction(data.action);
@@ -208,7 +249,10 @@ function restorable(data: unknown): { selection: Selection | null } | { denial: 
 }
 
 export class SessionState {
-	selection: Selection | undefined;
+	/** Undefined when nothing is overridden. */
+	overrides: SessionOverrides | undefined;
+	/** False after `/auto-review off`: no call of this session is gated or reviewed. */
+	enabled = true;
 	readonly breaker = new CircuitBreaker();
 	/** Increments per agent run; reviews started in an older run do not touch the breaker. */
 	runId = 0;
@@ -222,9 +266,10 @@ export class SessionState {
 		this.#append = append;
 	}
 
-	/** Rebuild from the active branch: selection and recent denials only; live grants expire. */
+	/** Rebuild from the active branch: on/off, overrides and recent denials only; live grants expire. */
 	replay(entries: readonly BranchEntry[]): void {
-		this.selection = undefined;
+		this.overrides = undefined;
+		this.enabled = true;
 		this.#denials = [];
 		this.#grants.clear();
 		this.#gatedDeviceCalls.clear();
@@ -232,7 +277,8 @@ export class SessionState {
 			if (entry.type !== "custom" || entry.customType !== ENTRY_TYPE) continue;
 			const fact = restorable(entry.data);
 			if (!fact) continue;
-			if ("selection" in fact) this.selection = fact.selection ?? undefined;
+			if ("overrides" in fact) this.overrides = hasOverrides(fact.overrides) ? fact.overrides : undefined;
+			else if ("enabled" in fact) this.enabled = fact.enabled;
 			else this.#rememberDenial(fact.denial);
 		}
 	}
@@ -247,14 +293,23 @@ export class SessionState {
 		return [...this.#denials].reverse();
 	}
 
-	setSelection(selection: Selection | undefined): void {
+	setOverrides(overrides: SessionOverrides | undefined): void {
+		const next = hasOverrides(overrides) ? overrides : undefined;
 		this.#append(ENTRY_TYPE, {
 			v: 1,
 			kind: "selection",
-			model: selection?.model ?? null,
-			effort: selection?.effort ?? null,
+			model: next?.model ?? null,
+			effort: next?.effort ?? null,
+			timeoutMs: next?.timeoutMs ?? null,
+			rules: next?.rules ?? null,
+			extraPolicy: next?.extraPolicy ?? null,
 		});
-		this.selection = selection && (selection.model || selection.effort) ? selection : undefined;
+		this.overrides = next;
+	}
+
+	setEnabled(enabled: boolean): void {
+		this.#append(ENTRY_TYPE, { v: 1, kind: "enabled", enabled });
+		this.enabled = enabled;
 	}
 
 	recordPlanAdoption(path: string, content: string, fromFile: boolean): void {

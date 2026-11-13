@@ -2,13 +2,15 @@
  * Plugin settings and reviewer model/effort selection.
  *
  * Settings come from OMP's native plugin configuration (global settings merged
- * with project overrides by the host). Interactive `/auto-review` selections
- * are session overrides layered above them and persisted by `state.ts`.
+ * with project overrides by the host). Interactive `/auto-review config`
+ * choices are session overrides layered above them and persisted by
+ * `state.ts`; `/auto-review save` writes them to the user's plugin settings.
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { getConfigDirPaths } from "@oh-my-pi/pi-coding-agent/config";
 import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { getPluginSettings } from "@oh-my-pi/pi-coding-agent/extensibility/plugins";
+import { getPluginSettings, PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins";
 import { DEFAULT_TIMEOUT_MS } from "./policy";
 
 export const PLUGIN_NAME = "omp-automode";
@@ -39,7 +41,7 @@ function optionalString(raw: Record<string, unknown>, key: string): string | und
 	return value;
 }
 
-function parseRules(value: unknown): ShellRule[] {
+export function parseRules(value: unknown): ShellRule[] {
 	if (value === undefined || value === null || value === "") return [];
 	let list: unknown = value;
 	// The plugin CLI stores string values; accept a JSON array encoded in one.
@@ -70,19 +72,10 @@ function parseRules(value: unknown): ShellRule[] {
 
 /** Validate raw plugin settings. Unknown keys are ignored like other OMP plugins. */
 export function parseSettings(raw: Record<string, unknown>): AutoReviewSettings {
-	const timeout = raw.timeoutMs;
-	let timeoutMs = DEFAULT_TIMEOUT_MS;
-	if (timeout !== undefined && timeout !== null && timeout !== "") {
-		const n = typeof timeout === "string" ? Number(timeout) : timeout;
-		if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) {
-			throw new SettingsError('setting "timeoutMs" must be a positive number');
-		}
-		timeoutMs = n;
-	}
 	return {
 		model: optionalString(raw, "model"),
 		effort: optionalString(raw, "effort"),
-		timeoutMs,
+		timeoutMs: parseTimeout(raw.timeoutMs) ?? DEFAULT_TIMEOUT_MS,
 		extraPolicy: optionalString(raw, "extraPolicy"),
 		policy: optionalString(raw, "policy"),
 		policyTemplate: optionalString(raw, "policyTemplate"),
@@ -90,14 +83,106 @@ export function parseSettings(raw: Record<string, unknown>): AutoReviewSettings 
 	};
 }
 
+/** A positive finite number of milliseconds; the plugin CLI stores it as text. Unset is undefined. */
+export function parseTimeout(value: unknown): number | undefined {
+	if (value === undefined || value === null || value === "") return undefined;
+	const n = typeof value === "string" ? Number(value) : value;
+	if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) {
+		throw new SettingsError('setting "timeoutMs" must be a positive number');
+	}
+	return n;
+}
+
 export async function loadSettings(cwd: string): Promise<AutoReviewSettings> {
 	return parseSettings(await getPluginSettings(PLUGIN_NAME, cwd));
 }
 
-/** Session override from `/auto-review`; null fields mean "inherit". */
-export interface Selection {
+/** Raw plugin settings as the host merges them, plus which keys the project overrides. */
+export interface SettingsSnapshot {
+	raw: Record<string, unknown>;
+	projectKeys: ReadonlySet<string>;
+	/** The project overrides file the host reads, when one exists. */
+	projectPath?: string;
+}
+
+/**
+ * Read the merged settings and the project layer separately so every value can
+ * name its origin. The project file is located like the host's loader does: the
+ * first readable `plugin-overrides.json` in the project config directories.
+ */
+export async function loadSnapshot(cwd: string): Promise<SettingsSnapshot> {
+	const raw = await getPluginSettings(PLUGIN_NAME, cwd);
+	for (const file of getConfigDirPaths("plugin-overrides.json", { user: false, cwd })) {
+		let overrides: unknown;
+		try {
+			overrides = await Bun.file(file).json();
+		} catch {
+			continue;
+		}
+		const settings = (overrides as { settings?: Record<string, unknown> } | null)?.settings?.[PLUGIN_NAME];
+		const keys = settings && typeof settings === "object" ? Object.keys(settings) : [];
+		return { raw, projectKeys: new Set(keys), projectPath: file };
+	}
+	return { raw, projectKeys: new Set() };
+}
+
+export type FileSource = "project settings" | "user settings" | "default";
+
+/** Where a setting's file value comes from; empty values count as unset, as in parsing. */
+export function fileSource(snapshot: SettingsSnapshot, key: string): FileSource {
+	const value = snapshot.raw[key];
+	if (value === undefined || value === null || value === "") return "default";
+	return snapshot.projectKeys.has(key) ? "project settings" : "user settings";
+}
+
+/**
+ * Session overrides from `/auto-review config`; null fields inherit the
+ * settings. An empty `rules` array or empty `extraPolicy` is an explicit
+ * override, not inheritance.
+ */
+export interface SessionOverrides {
 	model: string | null;
 	effort: string | null;
+	timeoutMs: number | null;
+	rules: ShellRule[] | null;
+	extraPolicy: string | null;
+}
+
+export const NO_OVERRIDES: SessionOverrides = { model: null, effort: null, timeoutMs: null, rules: null, extraPolicy: null };
+
+export const OVERRIDE_KEYS = ["model", "effort", "timeoutMs", "rules", "extraPolicy"] as const;
+export type OverrideKey = (typeof OVERRIDE_KEYS)[number];
+
+export function hasOverrides(overrides: SessionOverrides | undefined): overrides is SessionOverrides {
+	return !!overrides && OVERRIDE_KEYS.some(key => overrides[key] !== null);
+}
+
+/** Settings with the session's timeout, rules and extra policy applied; model and effort resolve in `resolveReviewer`. */
+export function applyOverrides(settings: AutoReviewSettings, overrides: SessionOverrides | undefined): AutoReviewSettings {
+	if (!overrides) return settings;
+	return {
+		...settings,
+		timeoutMs: overrides.timeoutMs ?? settings.timeoutMs,
+		rules: overrides.rules ?? settings.rules,
+		extraPolicy: overrides.extraPolicy ?? settings.extraPolicy,
+	};
+}
+
+/**
+ * Write the given overrides to the user's plugin settings, the file
+ * `omp plugin config set` writes, in the same text form the CLI stores. An
+ * empty extra policy deletes the key. Each key is a separate write: `written`
+ * receives every key on disk, also when a later write throws.
+ */
+export async function saveUserSettings(overrides: Partial<SessionOverrides>, written: OverrideKey[]): Promise<void> {
+	const manager = new PluginManager();
+	for (const key of OVERRIDE_KEYS) {
+		const value = overrides[key];
+		if (value === undefined || value === null) continue;
+		if (key === "extraPolicy" && value === "") await manager.deletePluginSetting(PLUGIN_NAME, key);
+		else await manager.setPluginSetting(PLUGIN_NAME, key, typeof value === "string" ? value : JSON.stringify(value));
+		written.push(key);
+	}
 }
 
 export type SelectionSource = "session" | "settings" | "session-model";
@@ -131,7 +216,7 @@ export function modelKey(model: Model<Api>): string {
  */
 export function resolveReviewer(
 	settings: AutoReviewSettings,
-	selection: Selection | undefined,
+	selection: Pick<SessionOverrides, "model" | "effort"> | undefined,
 	models: ModelLookup,
 ): EffectiveReviewer {
 	const explicitModel = selection?.model ?? settings.model;

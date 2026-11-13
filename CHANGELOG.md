@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `/auto-review` subcommands `show`, `config`, `on`, `off`, `approve`, `save`
+  and `reload`, with Tab completion. `/approve` is now an alias of
+  `/auto-review approve`.
+- `/auto-review off` turns automatic review fully off for the session and its
+  subagents after confirmation: no review and no shell rules. The status bar
+  shows `auto-review OFF` in red, and a resumed session that is off says so.
+- `/auto-review show` lists the effective configuration and where each value
+  comes from: session, project settings, user settings or default.
+- `/auto-review config` changes the timeout, shell rules and extra policy for
+  the session, besides the reviewer model and effort.
+- `/auto-review save` writes the session's changes to the user plugin settings.
+
+### Changed
+
+- Plain `/auto-review` shows the configuration; the model and effort dialog
+  moved to `/auto-review config`.
+- Subagents follow the session's on/off switch and session changes, including
+  the reviewer model and effort chosen for the session.
+
 ## [0.1.0] - 2026-11-13
 
 First release: an OMP plugin that reviews the agent's tool calls before they
