@@ -53,12 +53,17 @@ reviewed rather than blocked.
 ### Review outcomes
 
 - **Allow**: the action runs and a notice shows risk, authorization and the
-  reason.
+  reason. A short allow from the reviewer (low risk, no authorization rating)
+  shows only the risk.
 - **Deny**: the action does not run. The agent is told not to work around the
   denial, to choose a safer route or ask you, and to retry only after your
   informed approval.
 - **Failure or timeout**: the action does not run, and the agent is told this
-  is not a finding that the action is unsafe.
+  is not a finding that the action is unsafe. A model request that stays
+  silent for half of `timeoutMs` counts as stalled and is retried within the
+  same deadline, so a model that thinks silently for longer than that times
+  out; raise `timeoutMs` for such models. Models whose catalog entry sets its
+  own stream timeouts keep them.
 - **Context too large**: when the action and its minimum evidence cannot fit
   the reviewer model's context, you are asked to confirm that exact call
   manually; without an interactive answer it stays blocked.
@@ -137,6 +142,13 @@ tier of a family. In one comparison on the same fixture, a small model at low
 effort allowed a cleanup script without checking the unrelated archive it also
 deleted, while a larger model at the same effort inspected the target and denied
 it. That is a single observation, not a measured rate.
+
+Some outcomes stay a matter of the model's judgment rather than of this plugin.
+One example is whether a restriction in the repository's AGENTS.md outweighs
+your direct request. Asked explicitly to delete a remote branch that such a
+rule says needs approval naming its pull request, the tested reviewer allowed
+the deletion; a stricter model may deny it. Spell such conditions out in your
+request or in `extraPolicy` when the outcome matters.
 
 ## What the reviewer sees
 

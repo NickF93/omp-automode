@@ -10,24 +10,22 @@ import type { ShellRule } from "./settings";
 import { isRecord } from "./state";
 
 /** Metadata the gate reads from the host's live tool registry. */
-export interface GateToolInfo {
-	name: string;
-	description?: string;
+interface GateToolInfo {
 	mcpServerName?: string;
 	mcpReadOnlyHint?: boolean;
-	source?: string;
+	sourceInfo?: { source: string };
 }
 
-export interface GateInput {
+interface GateInput {
 	toolName: string;
 	input: Record<string, unknown>;
 	cwd: string;
 	rules: readonly ShellRule[];
-	tools: ReadonlyMap<string, GateToolInfo>;
+	toolInfo: (name: string) => GateToolInfo | undefined;
 }
 
-export type GateResult =
-	| { kind: "skip"; reason: string; xdInner?: string }
+type GateResult =
+	| { kind: "skip"; xdInner?: string }
 	| { kind: "forbidden"; rule: ShellRule; command: string[]; xdInner?: string }
 	| { kind: "review"; xdInner?: string };
 
@@ -76,6 +74,8 @@ const DEVICE_HELP_RE = /^\s*(\?|help)?\s*$/i;
 const CONTROL_DEVICES: Record<string, true> = toRecord(["resolve", "reject", "propose", "report_issue"]);
 
 const URL_SCHEME_RE = /^([a-z][a-z0-9+.-]*):\/\//i;
+/** `@scheme://…` is the host's shorthand for an internal URL. */
+const INTERNAL_URL_SHORTHAND_RE = /^@[a-z][a-z0-9+.-]*:\/\//i;
 
 function toRecord(keys: readonly string[]): Record<string, true> {
 	return Object.fromEntries(keys.map(key => [key, true] as const));
@@ -83,7 +83,7 @@ function toRecord(keys: readonly string[]): Record<string, true> {
 
 export function gate(input: GateInput): GateResult {
 	const { toolName, cwd } = input;
-	if (SKIP_TOOLS[toolName]) return { kind: "skip", reason: "read-only or control tool" };
+	if (SKIP_TOOLS[toolName]) return { kind: "skip" };
 	switch (toolName) {
 		case "bash":
 			return gateBash(input);
@@ -94,11 +94,11 @@ export function gate(input: GateInput): GateResult {
 		case "ast_edit":
 			return gateLocalTargets(astEditTargets(input.input), cwd);
 		case "lsp":
-			return gateLsp(input.input, cwd);
+			return gateLsp(input.input);
 	}
-	const info = input.tools.get(toolName);
-	const isMcp = info !== undefined && (info.mcpServerName !== undefined || info.source === "mcp");
-	if (isMcp && info.mcpReadOnlyHint === true) return { kind: "skip", reason: "MCP read-only hint" };
+	const info = input.toolInfo(toolName);
+	const isMcp = info !== undefined && (info.mcpServerName !== undefined || info.sourceInfo?.source === "mcp");
+	if (isMcp && info.mcpReadOnlyHint === true) return { kind: "skip" };
 	return { kind: "review" };
 }
 
@@ -107,10 +107,10 @@ export function gate(input: GateInput): GateResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Strip a hashline header wrapper (`[path]`, `[path#1A2B]`) exactly as the host
- * does before it routes a write, so the gate judges the path that is written.
+ * Strip a hashline header wrapper (`[path]`, `[path#1A2B]`) the way the host
+ * does before it routes a write or edit target.
  */
-export function unwrapHeaderPath(target: string): string {
+function unwrapHeaderPath(target: string): string {
 	const trimmed = target.trimEnd();
 	if (trimmed.length < 2 || trimmed[0] !== "[" || trimmed[trimmed.length - 1] !== "]") return target;
 	const inner = trimmed.slice(1, -1);
@@ -123,14 +123,10 @@ export function unwrapHeaderPath(target: string): string {
 function gateWrite(input: GateInput): GateResult {
 	const raw = input.input.path;
 	if (typeof raw !== "string" || raw.length === 0) return { kind: "review" };
-	const unwrapped = unwrapHeaderPath(raw);
-	// `@scheme://…` is the host's shorthand for an internal URL.
-	const target = /^@[a-z][a-z0-9+.-]*:\/\//i.test(unwrapped) ? unwrapped.slice(1) : unwrapped;
-	const scheme = URL_SCHEME_RE.exec(target)?.[1]?.toLowerCase();
-	if (scheme === "file") return gateLocalTargets([target], input.cwd);
-	if (scheme === "xd") return gateDevice(input, target.slice("xd://".length));
-	if (scheme && EXEMPT_WRITE_PROTOCOLS[scheme]) return { kind: "skip", reason: `${scheme}:// write` };
-	if (scheme) return { kind: "review" };
+	// The host unwraps the path once before routing, so the gate judges the path that is written.
+	const target = unwrapHeaderPath(raw);
+	const device = /^@?xd:\/\//i.exec(target);
+	if (device) return gateDevice(input, target.slice(device[0].length));
 	return gateLocalTargets([target], input.cwd);
 }
 
@@ -143,17 +139,17 @@ function gateDevice(input: GateInput, rest: string): GateResult {
 	const name = rest.split("/")[0] ?? "";
 	const content = typeof input.input.content === "string" ? input.input.content : "";
 	if (!name) return { kind: "review" };
-	if (DEVICE_HELP_RE.test(content)) return { kind: "skip", reason: "device documentation" };
-	if (CONTROL_DEVICES[name]) return { kind: "skip", reason: `xd://${name} control device`, xdInner: name };
+	if (DEVICE_HELP_RE.test(content)) return { kind: "skip" };
+	if (CONTROL_DEVICES[name]) return { kind: "skip", xdInner: name };
 	let args: unknown;
 	try {
 		args = JSON.parse(content);
 	} catch {
 		return { kind: "review" };
 	}
-	if (!args || typeof args !== "object" || Array.isArray(args)) return { kind: "review" };
+	if (!isRecord(args)) return { kind: "review" };
 	if (name === "write" || name === "read") return { kind: "review" };
-	const inner = gate({ ...input, toolName: name, input: args as Record<string, unknown> });
+	const inner = gate({ ...input, toolName: name, input: args });
 	return { ...inner, xdInner: name };
 }
 
@@ -161,7 +157,6 @@ function gateDevice(input: GateInput, rest: string): GateResult {
 // local file targets
 // ---------------------------------------------------------------------------
 
-/** Archive and SQLite selectors address a member of an existing backing file. */
 /**
  * Every file a target can name: the literal path and, when the text before the
  * first `:` is an existing file, that file as an archive or database whose member
@@ -205,7 +200,7 @@ function resolveAgainst(p: string, cwd: string): string {
 }
 
 /** Resolve symlinks of the longest existing ancestor and keep the remainder. */
-export function realTarget(absolute: string): string {
+function realTarget(absolute: string): string {
 	let current = absolute;
 	const rest: string[] = [];
 	for (;;) {
@@ -224,7 +219,7 @@ export function realTarget(absolute: string): string {
 }
 
 /** True when the target lies inside cwd and outside protected directories. */
-export function isLocalUnprotected(target: string, cwd: string): boolean {
+function isLocalUnprotected(target: string, cwd: string): boolean {
 	const scheme = URL_SCHEME_RE.exec(target)?.[1]?.toLowerCase();
 	if (scheme && scheme !== "file") return false;
 	const root = realTarget(path.resolve(cwd));
@@ -236,18 +231,16 @@ export function isLocalUnprotected(target: string, cwd: string): boolean {
 	});
 }
 
+/** Targets as the host resolves them: already unwrapped, exempt protocols skipped, everything else local and unprotected. */
 function gateLocalTargets(targets: string[] | undefined, cwd: string): GateResult {
 	if (!targets || targets.length === 0) return { kind: "review" };
-	const remote: string[] = [];
 	for (const raw of targets) {
-		const unwrapped = unwrapHeaderPath(raw);
-		const target = /^@[a-z][a-z0-9+.-]*:\/\//i.test(unwrapped) ? unwrapped.slice(1) : unwrapped;
+		const target = INTERNAL_URL_SHORTHAND_RE.test(raw) ? raw.slice(1) : raw;
 		const scheme = URL_SCHEME_RE.exec(target)?.[1]?.toLowerCase();
 		if (scheme && EXEMPT_WRITE_PROTOCOLS[scheme]) continue;
-		if (!isLocalUnprotected(target, cwd)) remote.push(target);
+		if (!isLocalUnprotected(target, cwd)) return { kind: "review" };
 	}
-	if (remote.length > 0) return { kind: "review" };
-	return { kind: "skip", reason: "local edit inside the working directory" };
+	return { kind: "skip" };
 }
 
 const PATCH_MARKER_RE = /^\*\*\* (?:Add File|Update File|Delete File|Move to):\s*(.+?)\s*$/;
@@ -262,24 +255,25 @@ function unquote(s: string): string {
 	return s;
 }
 
-/** Every source and destination an edit call can touch; undefined when none can be identified. */
+/**
+ * Every source and destination an edit call can touch; undefined when none can
+ * be identified. Header lines are already stripped of their brackets, as the
+ * host's event normalization strips them; every other target is unwrapped once.
+ */
 export function editTargets(input: Record<string, unknown>): string[] | undefined {
 	const targets: string[] = [];
-	for (const key of ["path", "_path", "move", "moveTo", "rename"]) {
-		const value = input[key];
-		if (typeof value === "string" && value.length > 0) targets.push(value);
-	}
+	const named = (value: unknown) => {
+		if (typeof value === "string" && value.length > 0) targets.push(unwrapHeaderPath(value));
+	};
+	for (const key of ["path", "_path", "move", "moveTo", "rename"]) named(input[key]);
 	const paths = input.paths;
-	if (Array.isArray(paths)) for (const p of paths) if (typeof p === "string" && p.length > 0) targets.push(p);
+	if (Array.isArray(paths)) for (const p of paths) named(p);
 	// Patch mode: every entry may rename its file.
 	const edits = input.edits;
 	if (Array.isArray(edits)) {
 		for (const entry of edits) {
 			if (!isRecord(entry)) continue;
-			for (const key of ["rename", "move", "path"]) {
-				const value = entry[key];
-				if (typeof value === "string" && value.length > 0) targets.push(value);
-			}
+			for (const key of ["rename", "move", "path"]) named(entry[key]);
 		}
 	}
 	for (const key of ["input", "_input"]) {
@@ -293,7 +287,7 @@ export function editTargets(input: Record<string, unknown>): string[] | undefine
 				continue;
 			}
 			const mv = MV_RE.exec(line) ?? PATCH_MARKER_RE.exec(line);
-			if (mv?.[1]) targets.push(unquote(mv[1]));
+			if (mv?.[1]) targets.push(unwrapHeaderPath(unquote(mv[1])));
 		}
 	}
 	return targets.length > 0 ? [...new Set(targets)] : undefined;
@@ -312,15 +306,15 @@ function astEditTargets(input: Record<string, unknown>): string[] | undefined {
 		if (parts.some(part => PROTECTED_COMPONENTS[part])) return undefined;
 		const firstGlob = parts.findIndex(part => GLOB_CHAR_RE.test(part));
 		const base = firstGlob < 0 ? pattern : parts.slice(0, firstGlob).join("/") || ".";
-		targets.push(base);
+		targets.push(unwrapHeaderPath(base));
 	}
 	return targets.length > 0 ? targets : undefined;
 }
 
-function gateLsp(input: Record<string, unknown>, cwd: string): GateResult {
+function gateLsp(input: Record<string, unknown>): GateResult {
 	const action = typeof input.action === "string" ? input.action.toLowerCase() : "";
-	if (LSP_QUERY_ACTIONS[action]) return { kind: "skip", reason: "LSP query" };
-	if (action === "code_actions" && input.apply !== true) return { kind: "skip", reason: "LSP query" };
+	if (LSP_QUERY_ACTIONS[action]) return { kind: "skip" };
+	if (action === "code_actions" && input.apply !== true) return { kind: "skip" };
 	// Renames (including file renames, which rewrite references), applied code actions and raw requests can edit files beyond the named ones.
 	return { kind: "review" };
 }
@@ -337,7 +331,7 @@ function gateBash(input: GateInput): GateResult {
 	return evaluateRules(commands, input.rules);
 }
 
-export function evaluateRules(commands: string[][], rules: readonly ShellRule[]): GateResult {
+function evaluateRules(commands: string[][], rules: readonly ShellRule[]): GateResult {
 	for (const argv of commands) {
 		const forbidden = rules.find(rule => rule.decision === "forbidden" && matchesPrefix(argv, rule.prefix));
 		if (forbidden) return { kind: "forbidden", rule: forbidden, command: argv };
@@ -345,7 +339,7 @@ export function evaluateRules(commands: string[][], rules: readonly ShellRule[])
 	const allowed = commands.every(argv =>
 		rules.some(rule => rule.decision === "allow" && matchesPrefix(argv, rule.prefix)),
 	);
-	return allowed && commands.length > 0 ? { kind: "skip", reason: "allowed by shell rule" } : { kind: "review" };
+	return allowed && commands.length > 0 ? { kind: "skip" } : { kind: "review" };
 }
 
 function matchesPrefix(argv: string[], prefix: readonly string[]): boolean {
@@ -443,17 +437,17 @@ function lexLiteralWords(source: string): Token[] | undefined {
 	return tokens;
 }
 
-/**
- * Parse a command made only of literal words joined by `&&`, `||`, `;`, `|`
- * or newlines into each command's argv. Undefined is not a ban: anything the
- * parser cannot prove literal goes to review.
- */
 /** Shell reserved words and prefixes that turn the following words into syntax rather than an argv. */
 const RESERVED_COMMAND_WORDS: Record<string, true> = toRecord([
 	"if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac",
 	"function", "select", "time", "coproc", "in", "[[", "]]", "!", "{", "}",
 ]);
 
+/**
+ * Parse a command made only of literal words joined by `&&`, `||`, `;`, `|`
+ * or newlines into each command's argv. Undefined is not a ban: anything the
+ * parser cannot prove literal goes to review.
+ */
 export function parseWordOnlySequence(source: string): string[][] | undefined {
 	const tokens = lexLiteralWords(source);
 	if (!tokens) return undefined;

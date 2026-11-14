@@ -93,14 +93,14 @@ describe("session state replay", () => {
 		state.setEnabled(false);
 		state.recordResult(result("d1", action(1), deny));
 		state.recordResult(result("t1", action(2)));
-		state.grant("denial_retry", action(1), "leaf", state.recentDenials()[0]);
+		state.grant(state.recentDenials()[0]!, "leaf");
 
 		const resumed = new SessionState(() => {});
 		resumed.replay(entries);
 		expect(resumed.overrides).toEqual(overrides);
 		expect(resumed.enabled).toBe(false);
 		expect(resumed.recentDenials().map(d => d.id)).toEqual(["d1"]);
-		expect(resumed.claim("denial_retry", action(1), "call-x")).toBeUndefined();
+		expect(resumed.claim(action(1), "call-x")).toBeUndefined();
 	});
 
 	test("turning review back on replays as on, and a branch without a switch entry is on", () => {
@@ -128,6 +128,19 @@ describe("session state replay", () => {
 		const resumed = new SessionState(() => {});
 		resumed.replay([{ type: "custom", customType: ENTRY_TYPE, data: { v: 1, kind: "selection", model: "p/a", effort: "low" } }]);
 		expect(resumed.overrides).toEqual({ model: "p/a", effort: "low", timeoutMs: null, rules: null, extraPolicy: null });
+	});
+
+	test("an empty model or effort is not a selection: the entry is ignored", () => {
+		const resumed = new SessionState(() => {});
+		const selection = (data: Record<string, unknown>) => ({
+			type: "custom",
+			customType: ENTRY_TYPE,
+			data: { v: 1, kind: "selection", timeoutMs: 120_000, ...data },
+		});
+		resumed.replay([selection({ model: "", effort: null }), selection({ model: null, effort: "" })]);
+		expect(resumed.overrides).toBeUndefined();
+		resumed.replay([selection({ model: null, effort: null, extraPolicy: "" })]);
+		expect(resumed.overrides?.extraPolicy).toBe("");
 	});
 
 	test("only the latest ten denial events are offered, newest first, without collapsing repeats", () => {
@@ -163,26 +176,26 @@ describe("session state replay", () => {
 });
 
 describe("one-use grants", () => {
+	const denial = { id: "d1", action: action(1), verdict: deny };
+
 	test("a grant is consumed exactly once and only for the identical action", () => {
 		const { state, entries } = recorder();
 		state.recordResult(result("d1", action(1), deny));
-		const denial = state.recentDenials()[0];
-		state.grant("denial_retry", action(1), "leaf", denial);
+		state.grant(state.recentDenials()[0]!, "leaf");
 
-		expect(state.claim("denial_retry", action(2), "c1")).toBeUndefined();
-		expect(state.claim("input_budget", action(1), "c1")).toBeUndefined();
+		expect(state.claim(action(2), "c1")).toBeUndefined();
 		const reordered: ActionKey = { session: "s1", cwd: "/w", input: { command: "rm -rf /data/1" }, tool: "bash" };
-		expect(state.claim("denial_retry", reordered, "c2")?.denial?.id).toBe("d1");
-		expect(state.claim("denial_retry", action(1), "c3")).toBeUndefined();
+		expect(state.claim(reordered, "c2")?.id).toBe("d1");
+		expect(state.claim(action(1), "c3")).toBeUndefined();
 		const kinds = entries.map(e => e.data.kind);
 		expect(kinds).toEqual(["result", "approval", "consumed"]);
 	});
 
 	test("the same action in another session or cwd does not match", () => {
 		const { state } = recorder();
-		state.grant("denial_retry", action(1), null);
-		expect(state.claim("denial_retry", { ...action(1), session: "s2" }, "c")).toBeUndefined();
-		expect(state.claim("denial_retry", { ...action(1), cwd: "/other" }, "c")).toBeUndefined();
+		state.grant(denial, null);
+		expect(state.claim({ ...action(1), session: "s2" }, "c")).toBeUndefined();
+		expect(state.claim({ ...action(1), cwd: "/other" }, "c")).toBeUndefined();
 	});
 
 	test("a failing audit append blocks the dependent claim and does not leave a reusable grant", () => {
@@ -190,18 +203,27 @@ describe("one-use grants", () => {
 		const state = new SessionState(() => {
 			if (fail) throw new Error("disk full");
 		});
-		state.grant("denial_retry", action(1), null);
+		state.grant(denial, null);
 		fail = true;
-		expect(() => state.claim("denial_retry", action(1), "c")).toThrow("disk full");
+		expect(() => state.claim(action(1), "c")).toThrow("disk full");
 		fail = false;
-		expect(state.claim("denial_retry", action(1), "c")).toBeUndefined();
+		expect(state.claim(action(1), "c")).toBeUndefined();
 	});
 
 	test("live expiry drops pending grants", () => {
 		const { state } = recorder();
-		state.grant("input_budget", action(1), null);
+		state.grant(denial, null);
 		state.expireLive();
-		expect(state.claim("input_budget", action(1), "c")).toBeUndefined();
+		expect(state.claim(action(1), "c")).toBeUndefined();
+	});
+
+	test("a manual run records its approval and its use together, leaving no grant", () => {
+		const { state, entries } = recorder();
+		state.approveManualRun(action(1), "leaf", "c1");
+		const [approval, consumed] = entries.map(e => e.data);
+		expect(approval).toMatchObject({ v: 1, kind: "approval", approvalKind: "input_budget", action: action(1), branchLeaf: "leaf", provenance: "input_budget_confirm" });
+		expect(consumed).toEqual({ v: 1, kind: "consumed", approvalId: approval?.kind === "approval" ? approval.id : "", toolCallId: "c1" });
+		expect(state.claim(action(1), "c2")).toBeUndefined();
 	});
 });
 

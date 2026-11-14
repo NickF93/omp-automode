@@ -65,8 +65,8 @@ export function truncateMiddle(text: string, maxBytes: number): string {
 // ---------------------------------------------------------------------------
 
 /** Priority classes for optional evidence, evicted in this order. */
-export type OptionalClass = "tool_description" | "commentary" | "tool" | "image";
-export const EVICTION_ORDER: readonly OptionalClass[] = ["tool_description", "commentary", "tool", "image"];
+type OptionalClass = "tool_description" | "commentary" | "tool" | "image";
+const EVICTION_ORDER: readonly OptionalClass[] = ["tool_description", "commentary", "tool", "image"];
 
 export interface TrustedInstruction {
 	/** Where the text comes from, shown to the reviewer. */
@@ -74,7 +74,7 @@ export interface TrustedInstruction {
 	text: string;
 }
 
-export interface TranscriptEntry {
+interface TranscriptEntry {
 	cls: OptionalClass;
 	label: string;
 	text: string;
@@ -363,7 +363,7 @@ export interface PlannedAction {
 	toolDescription?: string;
 }
 
-export interface RenderOptions {
+interface RenderOptions {
 	retryReason?: string;
 	imageInput: boolean;
 	/** Allow the last recovery step (shortening older trusted instructions); callers with other recovery left disable it. */
@@ -375,7 +375,7 @@ export interface RenderOptions {
 }
 
 /** Evidence after admission: what is actually sent. */
-export interface AdmittedEvidence {
+interface AdmittedEvidence {
 	trusted: TrustedInstruction[];
 	transcript: TranscriptEntry[];
 	priorReviews: string[];
@@ -456,7 +456,7 @@ function entryTokens(entry: TranscriptEntry, imageInput: boolean): number {
 	return (entry.image && imageInput ? IMAGE_TOKENS + estimateTokens(entry.image.mimeType) : estimateTokens(entry.text)) + estimateTokens(entry.label) + 4;
 }
 
-export type Admission =
+type Admission =
 	| { ok: true; message: UserMessage & { content: (TextContent | ImageContent)[] }; evidence: AdmittedEvidence; tokens: number }
 	| { ok: false; reason: string };
 
@@ -536,13 +536,13 @@ export function admit(
 	if (current.tokens <= ceiling) return { ok: true, ...current, evidence };
 
 	// Last step: shorten older trusted instructions, oldest first. The newest user
-	// message and explicit approvals for this action are never shortened.
+	// message and the last instruction, which is the explicit approval for this
+	// action when there is one, are never shortened.
 	if (options.shortenTrusted !== false) {
 		const newestUser = evidence.trusted.findLastIndex(t => t.source.endsWith("user message"));
 		for (let i = 0; i < evidence.trusted.length && current.tokens > ceiling; i++) {
+			if (i === newestUser || i === evidence.trusted.length - 1) continue;
 			const item = evidence.trusted[i] as TrustedInstruction;
-			const protectedItem = i === newestUser || i === evidence.trusted.length - 1 || item.source.startsWith("explicit approval");
-			if (protectedItem) continue;
 			const original = item.text;
 			let target = estimateTokens(original);
 			while (current.tokens > ceiling && target > MIN_SHORTENED_TOKENS) {
