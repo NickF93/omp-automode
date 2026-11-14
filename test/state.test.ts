@@ -130,6 +130,21 @@ describe("session state replay", () => {
 		expect(resumed.overrides).toEqual({ model: "p/a", effort: "low", timeoutMs: null, rules: null, extraPolicy: null });
 	});
 
+	test("legacy denials remain approvable; provenance alone never creates a grant", () => {
+		const legacy = result("legacy", action(1), deny);
+		const current = { ...result("current", action(2), deny), provenance: {
+			packageVersion: "0.2.2", verdictContract: "complete-v1" as const, instructionsSha256: "a".repeat(64),
+		} };
+		const resumed = new SessionState(() => {});
+		resumed.replay([legacy, current].map(data => ({ type: "custom", customType: ENTRY_TYPE, data })));
+		expect(resumed.recentDenials().map(d => d.id)).toEqual(["current", "legacy"]);
+		expect(resumed.claim(action(1), "unapproved-old")).toBeUndefined();
+		expect(resumed.claim(action(2), "unapproved-new")).toBeUndefined();
+		resumed.grant(resumed.recentDenials().find(d => d.id === "legacy")!, "leaf");
+		expect(resumed.claim(action(1), "approved-old")?.verdict).toEqual(deny);
+		expect(resumed.claim(action(1), "second-use")).toBeUndefined();
+	});
+
 	test("an empty model or effort is not a selection: the entry is ignored", () => {
 		const resumed = new SessionState(() => {});
 		const selection = (data: Record<string, unknown>) => ({

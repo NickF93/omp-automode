@@ -200,6 +200,24 @@ describe("trust labelling", () => {
 		const snap = captureEvidence(branch, options());
 		expect(snap.priorReviews).toHaveLength(8);
 		expect(snap.priorReviews.at(-1)).toContain("r9");
+		expect(snap.priorReviews.at(-1)).toContain("legacy review; field completeness not recorded");
+		expect(snap.trusted).toEqual([]);
+	});
+
+	test("complete provenance labels new assessments without granting authority", () => {
+		const data = {
+			v: 1, kind: "result", action: { tool: "bash", input: { command: "publish" } },
+			verdict: { outcome: "allow", risk_level: "high", user_authorization: "high", rationale: "publish approved payload" },
+			provenance: { packageVersion: "0.2.2", verdictContract: "complete-v1", instructionsSha256: "a".repeat(64) },
+		};
+		const snap = captureEvidence([{ type: "custom", customType: "omp-automode", data }], options());
+		expect(snap.priorReviews[0]).toContain("publish approved payload");
+		expect(snap.priorReviews[0]).not.toContain("legacy review");
+		expect(snap.trusted).toEqual([]);
+		const legacy = captureEvidence([{ type: "custom", customType: "omp-automode", data: {
+			...data, provenance: { ...data.provenance, verdictContract: "older" },
+		} }], options());
+		expect(legacy.priorReviews[0]).toContain("legacy review; field completeness not recorded");
 	});
 });
 
