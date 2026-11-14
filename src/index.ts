@@ -5,9 +5,11 @@
  * owners, and translate results into the host's `{ block, reason }`. The
  * commands live in `commands.ts`.
  */
+import { createHash } from "node:crypto";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { findScopedSettings, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { version } from "../package.json";
 import { registerCommands } from "./commands";
 import { captureEvidence, type CaptureOptions, type PlannedAction, type TrustedInstruction } from "./context";
 import { gate } from "./gate";
@@ -25,6 +27,7 @@ import {
 	retryApproval,
 	reviewerInstructions,
 	timeoutReason,
+	VERDICT_CONTRACT_VERSION,
 } from "./policy";
 import { type ReviewResult, review } from "./reviewer";
 import {
@@ -314,6 +317,7 @@ export default function automode(pi: ExtensionAPI): void {
 			via: call.via,
 			toolDescription: call.toolDescription,
 		};
+		const instructions = reviewerInstructions(settings, call.tool);
 		const controller = new AbortController();
 		inflight.add(controller);
 		const runId = state.runId;
@@ -324,7 +328,7 @@ export default function automode(pi: ExtensionAPI): void {
 				model: reviewer.model,
 				effort: reviewer.effort,
 				timeoutMs: settings.timeoutMs,
-				instructions: reviewerInstructions(settings, call.tool),
+				instructions,
 				action,
 				capture: () => captureEvidence(ctx.sessionManager.getBranch(), captureOptions(ctx, approvals)),
 				apiKey: ctx.modelRegistry.resolver(reviewer.model, `${sessionId}:auto-review`),
@@ -348,6 +352,11 @@ export default function automode(pi: ExtensionAPI): void {
 			result: result.kind,
 			...(result.kind === "verdict" ? { verdict: result.verdict } : {}),
 			...(result.kind === "failure" || result.kind === "input_budget" ? { detail: result.detail } : {}),
+			provenance: {
+				packageVersion: version,
+				verdictContract: VERDICT_CONTRACT_VERSION,
+				instructionsSha256: createHash("sha256").update(instructions).digest("hex"),
+			},
 			...result.stats,
 		};
 		try {
