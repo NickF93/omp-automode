@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-14
+
 ### Fixed
 
 - `write` and `edit` paths in a `[[…]]` wrapper are unwrapped once, as OMP
@@ -104,6 +106,7 @@ run, so the agent can work without per-action approval prompts.
   the only check; choose a capable model.
 - Pinned to OMP 18.19.0 through imports of host internals.
 
-[Unreleased]: https://github.com/NickF93/omp-automode/compare/v0.2.0...develop
+[Unreleased]: https://github.com/NickF93/omp-automode/compare/v0.2.1...develop
+[0.2.1]: https://github.com/NickF93/omp-automode/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/NickF93/omp-automode/releases/tag/v0.2.0
 [0.1.0]: https://github.com/NickF93/omp-automode/releases/tag/v0.1.0
