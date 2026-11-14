@@ -21,12 +21,12 @@ model and reasoning effort are configurable.
 omp install @nickf93/omp-automode
 ```
 
-To pin this release, use `omp install @nickf93/omp-automode@0.2.2`.
+To pin this release, use `omp install @nickf93/omp-automode@0.2.3`.
 
 Alternatively, install the tagged source from GitHub:
 
 ```bash
-omp install github:NickF93/omp-automode#v0.2.2
+omp install github:NickF93/omp-automode#v0.2.3
 ```
 
 The `#v…` suffix pins a release; without it the default branch is installed.
