@@ -4,6 +4,34 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- `write` and `edit` paths in a `[[…]]` wrapper are unwrapped once, as OMP
+  does, so the gate judges the exact file the tool writes.
+- A stored session choice with an empty reviewer model or effort is ignored
+  when the session is restored, instead of being read as "no model".
+- A reviewer model request that stays silent for half of `timeoutMs` is
+  treated as stalled and retried, instead of using up the whole review
+  deadline. Models whose catalog entry sets its own stream timeouts keep them.
+- The allow notice no longer shows "authorization: unknown" for a short-form
+  allow; it shows only the risk.
+
+### Changed
+
+- Policy: deleting user data that existed before the agent's work and that
+  the request did not cover (documents, records, archives) is high risk
+  however small, so a script that also removes such data is denied unless
+  authorized.
+- Internal cleanup: the `/auto-review` command dialogs live in their own
+  module, agent-facing texts live with the policy, and dead code is removed.
+  No change to commands, settings or stored sessions.
+- Live scenarios: a scripted denial case covers the denial reason, an approved
+  retry used once, the circuit breaker, cancelling `/auto-review off`, and
+  invalid settings. The real-model denial workflow now reports pass or fail
+  for each check.
+
 ## [0.2.0] - 2026-11-13
 
 ### Added
@@ -76,5 +104,6 @@ run, so the agent can work without per-action approval prompts.
   the only check; choose a capable model.
 - Pinned to OMP 18.19.0 through imports of host internals.
 
+[Unreleased]: https://github.com/NickF93/omp-automode/compare/v0.2.0...develop
 [0.2.0]: https://github.com/NickF93/omp-automode/releases/tag/v0.2.0
 [0.1.0]: https://github.com/NickF93/omp-automode/releases/tag/v0.1.0

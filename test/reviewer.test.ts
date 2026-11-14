@@ -130,7 +130,6 @@ function request(over: Partial<ReviewRequest> = {}): ReviewRequest {
 		instructions: "policy",
 		action: action(),
 		capture: () => snapshot(),
-		currentTrust: () => "f",
 		apiKey: "test-key",
 		sessionId: "s:auto-review",
 		signal: new AbortController().signal,
@@ -230,6 +229,20 @@ describe("review attempts", () => {
 		expect(Date.now() - started).toBeLessThan(2_000);
 	});
 
+	test("requests carry a stall bound of half the deadline unless the catalog sets a stream budget", async () => {
+		const bound = async (compat: Record<string, unknown> | undefined) => {
+			let options: SimpleStreamOptions | undefined;
+			const model = { ...scriptedModel(), ...(compat ? { compat } : {}) } as Model<Api>;
+			await run([(_c, o) => ((options = o), text('{"outcome":"allow"}'))], { model, timeoutMs: 90_000 });
+			return [options?.streamFirstEventTimeoutMs, options?.streamIdleTimeoutMs];
+		};
+		expect(await bound(undefined)).toEqual([45_000, 45_000]);
+		// Catalog-built models carry both keys even when unset.
+		expect(await bound({ streamIdleTimeoutMs: undefined, streamFirstEventTimeoutMs: undefined })).toEqual([45_000, 45_000]);
+		expect(await bound({ streamIdleTimeoutMs: 600_000 })).toEqual([undefined, undefined]);
+		expect(await bound({ streamFirstEventTimeoutMs: 0 })).toEqual([undefined, undefined]);
+	});
+
 	test("an external cancellation reports cancelled", async () => {
 		const controller = new AbortController();
 		const result = await run(
@@ -254,7 +267,7 @@ describe("review attempts", () => {
 				},
 				() => text('{"outcome":"deny","rationale":"user revoked"}'),
 			],
-			{ capture: () => snapshot(fingerprint), currentTrust: () => fingerprint },
+			{ capture: () => snapshot(fingerprint) },
 		);
 		expect(result.kind === "verdict" && result.verdict.outcome).toBe("deny");
 		expect(result.stats.attempts).toBe(2);

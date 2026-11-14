@@ -19,9 +19,9 @@ import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { admit, type EvidenceSnapshot, estimateRequest, type PlannedAction } from "./context";
 import { defaultRationale, MAX_ATTEMPTS, RETRY_BASE_DELAY_MS } from "./policy";
 import { INVESTIGATION_TOOLS, Sandbox, SandboxUnavailableError } from "./sandbox";
-import type { Verdict } from "./state";
+import { AUTHORIZATIONS, isOneOf, isRecord, RISK_LEVELS, type Verdict } from "./state";
 
-export interface ReviewStats {
+interface ReviewStats {
 	attempts: number;
 	checkpointRestarts: number;
 	samplingRequests: number;
@@ -44,8 +44,6 @@ export interface ReviewRequest {
 	action: PlannedAction;
 	/** Capture a fresh immutable evidence snapshot. */
 	capture: () => EvidenceSnapshot;
-	/** Fingerprint of the trusted instructions as they are now. */
-	currentTrust: () => string;
 	apiKey: ApiKey;
 	/** Reviewer session id, distinct from the main conversation's provider lineage. */
 	sessionId: string;
@@ -56,9 +54,6 @@ export interface ReviewRequest {
 // ---------------------------------------------------------------------------
 // Verdict parsing
 // ---------------------------------------------------------------------------
-
-const RISK_LEVELS: readonly string[] = ["low", "medium", "high", "critical"];
-const AUTHORIZATIONS: readonly string[] = ["unknown", "low", "medium", "high"];
 
 export class VerdictParseError extends Error {
 	override readonly name = "VerdictParseError";
@@ -83,26 +78,21 @@ export function parseVerdict(text: string): Verdict {
 			throw new VerdictParseError("reviewer answer was not valid JSON");
 		}
 	}
-	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-		throw new VerdictParseError("reviewer answer was not a JSON object");
-	}
-	const raw = parsed as Record<string, unknown>;
-	const outcome = raw.outcome;
+	if (!isRecord(parsed)) throw new VerdictParseError("reviewer answer was not a JSON object");
+	const outcome = parsed.outcome;
 	if (outcome !== "allow" && outcome !== "deny") throw new VerdictParseError("reviewer answer has no valid outcome");
-	const risk = raw.risk_level ?? (outcome === "allow" ? "low" : "high");
-	if (typeof risk !== "string" || !RISK_LEVELS.includes(risk)) throw new VerdictParseError("invalid risk_level");
-	const authorization = raw.user_authorization ?? "unknown";
-	if (typeof authorization !== "string" || !AUTHORIZATIONS.includes(authorization)) {
-		throw new VerdictParseError("invalid user_authorization");
-	}
-	const rationale = raw.rationale;
+	const risk = parsed.risk_level ?? (outcome === "allow" ? "low" : "high");
+	if (!isOneOf(RISK_LEVELS, risk)) throw new VerdictParseError("invalid risk_level");
+	const authorization = parsed.user_authorization ?? "unknown";
+	if (!isOneOf(AUTHORIZATIONS, authorization)) throw new VerdictParseError("invalid user_authorization");
+	const rationale = parsed.rationale;
 	if (rationale !== undefined && rationale !== null && typeof rationale !== "string") {
 		throw new VerdictParseError("invalid rationale");
 	}
 	return {
 		outcome,
-		risk_level: risk as Verdict["risk_level"],
-		user_authorization: authorization as Verdict["user_authorization"],
+		risk_level: risk,
+		user_authorization: authorization,
 		rationale: typeof rationale === "string" && rationale.trim() ? rationale.trim() : defaultRationale(outcome),
 	};
 }
@@ -155,6 +145,12 @@ async function runAttempt(
 	const snapshot = req.capture();
 	const systemPrompt = [req.instructions];
 	const imageInput = req.model.input.includes("image");
+	// A request silent for half the review time is stalled: fail it as transient so the next
+	// attempt still has time. Models whose catalog entry declares its own stream budget are
+	// known to stay silent longer while reasoning; they keep that budget.
+	const compat = req.model.compat as { streamIdleTimeoutMs?: number; streamFirstEventTimeoutMs?: number } | undefined;
+	const stallMs =
+		compat?.streamIdleTimeoutMs !== undefined || compat?.streamFirstEventTimeoutMs !== undefined ? undefined : Math.floor(req.timeoutMs / 2);
 	let restarted = false;
 
 	for (;;) {
@@ -163,7 +159,6 @@ async function runAttempt(
 		/** Completed groups: one assistant message plus all its tool results. */
 		const groups: Message[][] = [];
 		let omittedSteps = 0;
-		let needRestart = false;
 		/** Set once when the server rejects a request the local estimate admitted. */
 		let ceilingTokens: number | undefined;
 		try {
@@ -190,7 +185,6 @@ async function runAttempt(
 				if (!admission.ok) admission = tryAdmit(true);
 				if (!admission.ok) {
 					if (groups.length === 0) return { kind: "input_budget", detail: admission.reason };
-					needRestart = true;
 					break;
 				}
 				if (signal.aborted) return { kind: "aborted" };
@@ -205,6 +199,7 @@ async function runAttempt(
 							sessionId: req.sessionId,
 							signal,
 							maxHttpAttempts: 1,
+							...(stallMs === undefined ? {} : { streamFirstEventTimeoutMs: stallMs, streamIdleTimeoutMs: stallMs }),
 							...(req.effort ? { reasoning: req.effort as Effort } : {}),
 							// The transport may replay internally; each completed attempt is a sampling request.
 							onAttempt: () => nativeAttempts++,
@@ -248,7 +243,6 @@ async function runAttempt(
 						}
 						return { kind: "input_budget", detail: "the reviewer request exceeds the model's context window" };
 					}
-					needRestart = true;
 					break;
 				}
 				const calls = response.content.filter((part): part is ToolCall => part.type === "toolCall");
@@ -288,7 +282,7 @@ async function runAttempt(
 		} finally {
 			await sandbox.dispose();
 		}
-		if (!needRestart) continue;
+		// Only a context overflow leaves the loop above without returning.
 		// One checkpoint restart per attempt, with fresh processes and no discarded history.
 		if (restarted) return { kind: "input_budget", detail: "investigation exceeded the context window again after a restart" };
 		restarted = true;
@@ -347,7 +341,7 @@ export async function review(req: ReviewRequest): Promise<ReviewResult> {
 			let retryAfterMs = 0;
 			switch (outcome.kind) {
 				case "verdict":
-					if (outcome.fingerprint === req.currentTrust()) {
+					if (outcome.fingerprint === req.capture().trustFingerprint) {
 						return { kind: "verdict", verdict: outcome.verdict, stats: stats() };
 					}
 					// Authorization changed while the reviewer worked: recapture without service backoff.

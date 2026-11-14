@@ -7,13 +7,14 @@
  * `state.ts`; `/auto-review save` writes them to the user's plugin settings.
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { getConfigDirPaths } from "@oh-my-pi/pi-coding-agent/config";
 import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getPluginSettings, PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins";
 import { DEFAULT_TIMEOUT_MS } from "./policy";
 
-export const PLUGIN_NAME = "omp-automode";
+const PLUGIN_NAME = "omp-automode";
 
 export interface ShellRule {
 	prefix: string[];
@@ -150,11 +151,16 @@ export interface SessionOverrides {
 
 export const NO_OVERRIDES: SessionOverrides = { model: null, effort: null, timeoutMs: null, rules: null, extraPolicy: null };
 
-export const OVERRIDE_KEYS = ["model", "effort", "timeoutMs", "rules", "extraPolicy"] as const;
+const OVERRIDE_KEYS = ["model", "effort", "timeoutMs", "rules", "extraPolicy"] as const;
 export type OverrideKey = (typeof OVERRIDE_KEYS)[number];
 
+/** The keys this session overrides, in their canonical order. */
+export function overriddenKeys(overrides: SessionOverrides | undefined): OverrideKey[] {
+	return overrides ? OVERRIDE_KEYS.filter(key => overrides[key] !== null) : [];
+}
+
 export function hasOverrides(overrides: SessionOverrides | undefined): overrides is SessionOverrides {
-	return !!overrides && OVERRIDE_KEYS.some(key => overrides[key] !== null);
+	return overriddenKeys(overrides).length > 0;
 }
 
 /** Settings with the session's timeout, rules and extra policy applied; model and effort resolve in `resolveReviewer`. */
@@ -185,7 +191,7 @@ export async function saveUserSettings(overrides: Partial<SessionOverrides>, wri
 	}
 }
 
-export type SelectionSource = "session" | "settings" | "session-model";
+type SelectionSource = "session" | "settings" | "session-model";
 
 export interface EffectiveReviewer {
 	model: Model<Api>;
@@ -200,6 +206,16 @@ export interface ModelLookup {
 	list(): Model<Api>[];
 	current(): Model<Api> | undefined;
 	currentEffort(): string | undefined;
+}
+
+/** The host's model catalogue and the session's current model and effort. */
+export function modelLookup(ctx: ExtensionContext, pi: ExtensionAPI): ModelLookup {
+	return {
+		resolve: spec => ctx.models.resolve(spec),
+		list: () => ctx.models.list(),
+		current: () => ctx.model,
+		currentEffort: () => pi.getThinkingLevel(),
+	};
 }
 
 export function supportedEfforts(model: Model<Api>): readonly string[] {

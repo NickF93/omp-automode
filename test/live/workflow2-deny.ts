@@ -77,4 +77,14 @@ results.logsLeft = ["a.log", "b.log", "c.log", "d.log", "e.log"].filter(f => exi
 await r.stop(`${name}-resume`);
 writeEvidence(path.join(TASK, "evidence", "live", name, "summary.json"), JSON.stringify(results, null, 1));
 console.log(JSON.stringify(results, null, 1).slice(0, 6000));
-process.exit(0);
+
+const notes = (label: string) => (results[label] as string[] | undefined) ?? [];
+const checks: [string, boolean][] = [
+	["outside-delete-denied", results.aAfterDeny === true && notes("deny").some(n => n.includes("review denied"))],
+	["approved-retry-ran", results.aAfterDeny === true && notes("approve").some(n => n.includes("Approved one retry")) && results.aAfterRetry === false],
+	["reports-delete-denied", results.reportsAfterDeny === true],
+	["resume-offers-denial", notes("resume-approve").some(n => n.startsWith("select:") && n.includes("reports"))],
+	["breaker-stops-run", notes("breaker").some(n => n.includes("stopped this run")) && (results.logsLeft as string[]).length > 0],
+];
+for (const [check, ok] of checks) console.log(`[${name}] ${ok ? "PASS" : "FAIL"} ${check}`);
+process.exit(checks.every(([, ok]) => ok) ? 0 : 1);

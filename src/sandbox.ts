@@ -13,7 +13,7 @@ import { BYTES_PER_TOKEN, TOOL_ENTRY_MAX_TOKENS } from "./policy";
 import { truncateMiddle } from "./context";
 
 /** Exact bubblewrap profile; argv is passed directly, never through a host shell. */
-export function bwrapArgv(cwd: string, command: string): string[] {
+function bwrapArgv(cwd: string, command: string): string[] {
 	return [
 		"bwrap",
 		"--ro-bind",
@@ -133,7 +133,7 @@ export const INVESTIGATION_TOOLS: Tool[] = [
 	},
 ];
 
-export interface ToolOutcome {
+interface ToolOutcome {
 	text: string;
 	image?: ImageContent;
 	isError: boolean;

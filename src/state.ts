@@ -16,7 +16,7 @@ import {
 import { hasOverrides, parseRules, parseTimeout, type SessionOverrides, type ShellRule } from "./settings";
 
 export const ENTRY_TYPE = "omp-automode";
-const ENTRY_VERSION = 1;
+export const ENTRY_VERSION = 1;
 
 /** The exact action a review judged. */
 export interface ActionKey {
@@ -26,17 +26,20 @@ export interface ActionKey {
 	session: string;
 }
 
+export const RISK_LEVELS = ["low", "medium", "high", "critical"] as const;
+export const AUTHORIZATIONS = ["unknown", "low", "medium", "high"] as const;
+
 export interface Verdict {
-	risk_level: "low" | "medium" | "high" | "critical";
-	user_authorization: "unknown" | "low" | "medium" | "high";
+	risk_level: (typeof RISK_LEVELS)[number];
+	user_authorization: (typeof AUTHORIZATIONS)[number];
 	outcome: "allow" | "deny";
 	rationale: string;
 }
 
-export type ResultKind = "verdict" | "timeout" | "cancelled" | "failure" | "input_budget";
+type ResultKind = "verdict" | "timeout" | "cancelled" | "failure" | "input_budget";
 
 export interface ResultEntry {
-	v: 1;
+	v: typeof ENTRY_VERSION;
 	kind: "result";
 	id: string;
 	runId: string;
@@ -54,8 +57,8 @@ export interface ResultEntry {
 }
 
 /** Session overrides; entries written before 0.2.0 carry only model and effort. */
-export interface SelectionEntry {
-	v: 1;
+interface SelectionEntry {
+	v: typeof ENTRY_VERSION;
 	kind: "selection";
 	model: string | null;
 	effort: string | null;
@@ -65,16 +68,16 @@ export interface SelectionEntry {
 }
 
 /** `/auto-review on|off` for this session. */
-export interface EnabledEntry {
-	v: 1;
+interface EnabledEntry {
+	v: typeof ENTRY_VERSION;
 	kind: "enabled";
 	enabled: boolean;
 }
 
-export type ApprovalKind = "denial_retry" | "input_budget";
+type ApprovalKind = "denial_retry" | "input_budget";
 
-export interface ApprovalEntry {
-	v: 1;
+interface ApprovalEntry {
+	v: typeof ENTRY_VERSION;
 	kind: "approval";
 	id: string;
 	approvalKind: ApprovalKind;
@@ -85,17 +88,16 @@ export interface ApprovalEntry {
 	provenance: "approve_command" | "input_budget_confirm";
 }
 
-export interface ConsumedEntry {
-	v: 1;
+interface ConsumedEntry {
+	v: typeof ENTRY_VERSION;
 	kind: "consumed";
 	approvalId: string;
 	toolCallId: string;
-	reviewId?: string;
 }
 
 /** A plan the user approved in native plan review, recorded at its position on the branch. */
-export interface PlanAdoptionEntry {
-	v: 1;
+interface PlanAdoptionEntry {
+	v: typeof ENTRY_VERSION;
 	kind: "plan_adoption";
 	path: string;
 	content: string;
@@ -112,17 +114,10 @@ export type PersistedEntry =
 	| PlanAdoptionEntry;
 
 /** A completed policy denial offered by `/approve`. */
-export interface DenialEvent {
+interface DenialEvent {
 	id: string;
 	action: ActionKey;
 	verdict: Verdict;
-}
-
-export interface Grant {
-	id: string;
-	kind: ApprovalKind;
-	denial?: DenialEvent;
-	action: ActionKey;
 }
 
 /** Stable structural JSON: object keys sorted, so equal actions compare equal. */
@@ -135,12 +130,12 @@ export function canonicalJson(value: unknown): string {
 	});
 }
 
-export function sameAction(a: ActionKey, b: ActionKey): boolean {
+function sameAction(a: ActionKey, b: ActionKey): boolean {
 	return a.tool === b.tool && a.cwd === b.cwd && a.session === b.session && canonicalJson(a.input) === canonicalJson(b.input);
 }
 
 /** Outcome of recording one reviewed result in the breaker. */
-export interface BreakerTrip {
+interface BreakerTrip {
 	consecutive: number;
 	inWindow: number;
 	windowSize: number;
@@ -173,10 +168,10 @@ export class CircuitBreaker {
 	}
 }
 
-export type AppendEntry = (customType: string, data: PersistedEntry) => void;
+type AppendEntry = (customType: string, data: PersistedEntry) => void;
 
 /** Branch entry as returned by the session manager; only custom entries matter here. */
-export interface BranchEntry {
+interface BranchEntry {
 	type: string;
 	customType?: string;
 	data?: unknown;
@@ -187,19 +182,21 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+/** Membership in a literal list, narrowing untyped data to the list's members. */
+export function isOneOf<T>(list: readonly T[], value: unknown): value is T {
+	return (list as readonly unknown[]).includes(value);
+}
+
 function optionalString(value: unknown): value is string | null {
 	return value === null || typeof value === "string";
 }
 
-const RISKS: readonly unknown[] = ["low", "medium", "high", "critical"];
-const AUTHORIZATIONS: readonly unknown[] = ["unknown", "low", "medium", "high"];
-
 function parseVerdict(value: unknown): Verdict | undefined {
 	if (!isRecord(value)) return undefined;
 	const { risk_level, user_authorization, outcome, rationale } = value;
-	if (!RISKS.includes(risk_level) || !AUTHORIZATIONS.includes(user_authorization)) return undefined;
+	if (!isOneOf(RISK_LEVELS, risk_level) || !isOneOf(AUTHORIZATIONS, user_authorization)) return undefined;
 	if ((outcome !== "allow" && outcome !== "deny") || typeof rationale !== "string") return undefined;
-	return { risk_level, user_authorization, outcome, rationale } as Verdict;
+	return { risk_level, user_authorization, outcome, rationale };
 }
 
 function parseAction(value: unknown): ActionKey | undefined {
@@ -215,6 +212,8 @@ function parseAction(value: unknown): ActionKey | undefined {
 function parseOverrides(data: Record<string, unknown>): SessionOverrides | undefined {
 	const { model, effort, timeoutMs = null, rules = null, extraPolicy = null } = data;
 	if (!optionalString(model) || !optionalString(effort) || !optionalString(extraPolicy)) return undefined;
+	// An empty model or effort names nothing; only an empty extra policy is a deliberate override.
+	if (model === "" || effort === "") return undefined;
 	if (rules !== null && !Array.isArray(rules)) return undefined;
 	if (timeoutMs !== null && typeof timeoutMs !== "number") return undefined;
 	try {
@@ -257,7 +256,8 @@ export class SessionState {
 	/** Increments per agent run; reviews started in an older run do not touch the breaker. */
 	runId = 0;
 	#denials: DenialEvent[] = [];
-	#grants = new Map<string, Grant>();
+	/** Live retry grants by approval id. */
+	#grants = new Map<string, DenialEvent>();
 	/** Device calls already gated at their `write xd://` envelope, keyed by tool-call id and inner tool. */
 	#gatedDeviceCalls = new Set<string>();
 	#append: AppendEntry;
@@ -271,8 +271,7 @@ export class SessionState {
 		this.overrides = undefined;
 		this.enabled = true;
 		this.#denials = [];
-		this.#grants.clear();
-		this.#gatedDeviceCalls.clear();
+		this.expireLive();
 		for (const entry of entries) {
 			if (entry.type !== "custom" || entry.customType !== ENTRY_TYPE) continue;
 			const fact = restorable(entry.data);
@@ -281,6 +280,18 @@ export class SessionState {
 			else if ("enabled" in fact) this.enabled = fact.enabled;
 			else this.#rememberDenial(fact.denial);
 		}
+	}
+
+	/** A user-driven agent run starts: the breaker counts afresh. */
+	startRun(): void {
+		this.runId++;
+		this.breaker.reset();
+	}
+
+	/** The run ended: its late reviews no longer touch the breaker, and its live permissions expire. */
+	endRun(): void {
+		this.startRun();
+		this.expireLive();
 	}
 
 	#rememberDenial(event: DenialEvent): void {
@@ -296,7 +307,7 @@ export class SessionState {
 	setOverrides(overrides: SessionOverrides | undefined): void {
 		const next = hasOverrides(overrides) ? overrides : undefined;
 		this.#append(ENTRY_TYPE, {
-			v: 1,
+			v: ENTRY_VERSION,
 			kind: "selection",
 			model: next?.model ?? null,
 			effort: next?.effort ?? null,
@@ -308,12 +319,12 @@ export class SessionState {
 	}
 
 	setEnabled(enabled: boolean): void {
-		this.#append(ENTRY_TYPE, { v: 1, kind: "enabled", enabled });
+		this.#append(ENTRY_TYPE, { v: ENTRY_VERSION, kind: "enabled", enabled });
 		this.enabled = enabled;
 	}
 
 	recordPlanAdoption(path: string, content: string, fromFile: boolean): void {
-		this.#append(ENTRY_TYPE, { v: 1, kind: "plan_adoption", path, content, fromFile });
+		this.#append(ENTRY_TYPE, { v: ENTRY_VERSION, kind: "plan_adoption", path, content, fromFile });
 	}
 
 	recordResult(entry: ResultEntry): void {
@@ -323,37 +334,46 @@ export class SessionState {
 		}
 	}
 
-	/** Create a one-use grant after the user's explicit dialog answer. Persisted as audit before it is usable. */
-	grant(kind: ApprovalKind, action: ActionKey, branchLeaf: string | null, denial?: DenialEvent): Grant {
+	/** Grant one reviewed retry of exactly the denied action after the user's `/approve` answer. Persisted as audit before it is usable. */
+	grant(denial: DenialEvent, branchLeaf: string | null): void {
+		const id = this.#appendApproval("denial_retry", denial.action, branchLeaf, denial.id);
+		this.#grants.set(id, denial);
+	}
+
+	/**
+	 * Claim the live retry grant for exactly this action, synchronously so
+	 * concurrent calls cannot share it, and record its consumption. A throwing
+	 * append leaves the grant claimed and propagates, blocking the action.
+	 */
+	claim(action: ActionKey, toolCallId: string): DenialEvent | undefined {
+		for (const [id, denial] of this.#grants) {
+			if (!sameAction(denial.action, action)) continue;
+			this.#grants.delete(id);
+			this.#append(ENTRY_TYPE, { v: ENTRY_VERSION, kind: "consumed", approvalId: id, toolCallId });
+			return denial;
+		}
+		return undefined;
+	}
+
+	/** The user confirmed running this exact pending call without review: record the approval and its use. */
+	approveManualRun(action: ActionKey, branchLeaf: string | null, toolCallId: string): void {
+		const approvalId = this.#appendApproval("input_budget", action, branchLeaf);
+		this.#append(ENTRY_TYPE, { v: ENTRY_VERSION, kind: "consumed", approvalId, toolCallId });
+	}
+
+	#appendApproval(kind: ApprovalKind, action: ActionKey, branchLeaf: string | null, denialId?: string): string {
 		const id = crypto.randomUUID();
 		this.#append(ENTRY_TYPE, {
-			v: 1,
+			v: ENTRY_VERSION,
 			kind: "approval",
 			id,
 			approvalKind: kind,
-			denialId: denial?.id,
+			denialId,
 			action,
 			branchLeaf,
 			provenance: kind === "denial_retry" ? "approve_command" : "input_budget_confirm",
 		});
-		const grant: Grant = { id, kind, denial, action };
-		this.#grants.set(id, grant);
-		return grant;
-	}
-
-	/**
-	 * Claim the live grant of `kind` for exactly this action, synchronously so
-	 * concurrent calls cannot share it, and record its consumption. A throwing
-	 * append leaves the grant claimed and propagates, blocking the action.
-	 */
-	claim(kind: ApprovalKind, action: ActionKey, toolCallId: string): Grant | undefined {
-		for (const grant of this.#grants.values()) {
-			if (grant.kind !== kind || !sameAction(grant.action, action)) continue;
-			this.#grants.delete(grant.id);
-			this.#append(ENTRY_TYPE, { v: 1, kind: "consumed", approvalId: grant.id, toolCallId });
-			return grant;
-		}
-		return undefined;
+		return id;
 	}
 
 	/** Remember that an envelope gate covered the inner device call. */
@@ -372,3 +392,6 @@ export class SessionState {
 		this.#gatedDeviceCalls.clear();
 	}
 }
+
+/** A session's on/off switch and overrides; subagents follow their parent's. */
+export type Control = Pick<SessionState, "enabled" | "overrides">;
