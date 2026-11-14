@@ -7,6 +7,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import { type RpcAgentProcess, RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
+import { name as PLUGIN_NAME } from "../../package.json";
 
 function required(name: string): string {
 	const value = process.env[name];
@@ -87,7 +88,7 @@ export class Case {
 			mkdirSync(plugins, { recursive: true });
 			writeFileSync(
 				path.join(plugins, "omp-plugins.lock.json"),
-				JSON.stringify({ plugins: {}, settings: { "omp-automode": this.opts.plugin } }, null, 2),
+				JSON.stringify({ plugins: {}, settings: { [PLUGIN_NAME]: this.opts.plugin } }, null, 2),
 			);
 		}
 		// A repository root at the case's working directory bounds native project discovery

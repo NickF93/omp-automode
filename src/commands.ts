@@ -236,7 +236,7 @@ export function registerCommands(pi: ExtensionAPI, { state, control, refresh, sh
 
 	async function configCommand(ctx: ExtensionCommandContext): Promise<void> {
 		if (!ctx.hasUI) {
-			ctx.ui.notify("/auto-review config needs interactive dialogs; use omp plugin config set omp-automode <key> <value>.", "error");
+			ctx.ui.notify("/auto-review config needs interactive dialogs; use omp plugin config set @nickf93/omp-automode <key> <value>.", "error");
 			return;
 		}
 		const snapshot = await readSnapshot(ctx);
