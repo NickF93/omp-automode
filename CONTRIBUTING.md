@@ -47,6 +47,52 @@ git config gitflow.prefix.versiontag v
    Issue (`Closes #<issue>`).
 5. The maintainer merges with a merge commit; source branches are kept.
 
+## Releasing
+
+Use `hotfix/<version>` from `main` for a production fix, or
+`release/<version>` from `develop` for a planned release. Obtain the required
+owner approval for release scope, PR merges and tags; never push directly to
+`main` or `develop`.
+
+1. Update `package.json`, the lockfile identity/version, installation examples
+   and `CHANGELOG.md`. Use a new version: published versions and release tags
+   are immutable; never replace an existing release.
+2. Install dependencies with `bun install --frozen-lockfile`, then validate:
+
+   ```bash
+   bun run check
+   bun run test
+   npm pack --dry-run
+   ```
+
+   Review the packed file list: it must include the plugin source,
+   `package.json`, `README.md`, `CHANGELOG.md` and `LICENSE`, without secrets,
+   local settings or test artifacts.
+3. Merge the reviewed release/hotfix PR into `main` with a merge commit and
+   retain its source branch. Tag the released `main` revision as `v<version>`;
+   never move or overwrite a published tag.
+4. From a verified clean checkout of that exact released revision, confirm the
+   version, rerun the validation and pack review above, then publish:
+
+   ```bash
+   npm publish --access public
+   npm view @nickf93/omp-automode version
+   ```
+
+   Confirm the registry reports the released version. Publishing requires an
+   authenticated npm account authorized for the `@nickf93` scope; npm may
+   require 2FA or an appropriately authorized token. Follow the official
+   [scoped public package instructions](https://docs.npmjs.com/creating-and-publishing-scoped-public-packages/).
+   Never put credentials or tokens in source, commands recorded in release
+   notes, or committed configuration.
+5. Install the published version through OMP and verify it loads:
+   `omp install @nickf93/omp-automode@<version>`. Follow the README migration
+   steps first if an old unscoped install is present.
+6. Backmerge the released changes into `develop` through an approved PR,
+   preserving the release history. Publish full GitHub release notes for
+   `v<version>`, including changes, migration instructions, validation results
+   and the npm/OMP installation command.
+
 ## AI-assisted contributions
 
 Contributions written with AI assistance are welcome. The person who submits

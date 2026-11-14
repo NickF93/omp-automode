@@ -515,7 +515,7 @@ await guarded("switch", async () => {
 	const showSession = await noticesOf(r, "/auto-review show");
 	// The project overrides timeoutMs with an empty value: the host merge still lets it win.
 	mkdirSync(path.join(r.work, ".omp"), { recursive: true });
-	writeFileSync(path.join(r.work, ".omp", "plugin-overrides.json"), JSON.stringify({ settings: { "omp-automode": { timeoutMs: "" } } }));
+	writeFileSync(path.join(r.work, ".omp", "plugin-overrides.json"), JSON.stringify({ settings: { "@nickf93/omp-automode": { timeoutMs: "" } } }));
 	const saveNotice = await noticesOf(r, "/auto-review save");
 	const lock = JSON.parse(readFileSync(path.join(r.dir, "home", ".omp", "plugins", "omp-plugins.lock.json"), "utf8")) as {
 		settings: Record<string, Record<string, unknown>>;
@@ -527,7 +527,7 @@ await guarded("switch", async () => {
 	// An external edit of the user settings file, then reload.
 	const lockPath = path.join(r.dir, "home", ".omp", "plugins", "omp-plugins.lock.json");
 	const edited = JSON.parse(readFileSync(lockPath, "utf8")) as { settings: Record<string, Record<string, unknown>> };
-	edited.settings["omp-automode"] = { ...edited.settings["omp-automode"], extraPolicy: "External note." };
+	edited.settings["@nickf93/omp-automode"] = { ...edited.settings["@nickf93/omp-automode"], extraPolicy: "External note." };
 	writeFileSync(lockPath, JSON.stringify(edited, null, 2));
 	const reloaded = await noticesOf(r, "/auto-review reload");
 	expect("switch:reload-shows-external-edit", /Extra policy \(from user settings\):\n {2}External note\./.test(reloaded), reloaded);
@@ -544,7 +544,7 @@ await guarded("switch", async () => {
 		configTimeout,
 		showSession,
 		saveNotice,
-		saved: lock.settings["omp-automode"],
+		saved: lock.settings["@nickf93/omp-automode"],
 		showSaved,
 		savedRun: bashResult(r, "echo saved-run")?.result,
 		reviewsSaved,
@@ -698,7 +698,7 @@ await guarded("deny", async () => {
 	const afterOff = { reviewed: approvedReviews.length - reviewsBefore, kept: exists("target/f.log") };
 	// Invalid project settings block every reviewed call with their reason; reload reports them.
 	mkdirSync(path.join(c.work, ".omp"), { recursive: true });
-	writeFileSync(path.join(c.work, ".omp", "plugin-overrides.json"), JSON.stringify({ settings: { "omp-automode": { rules: "not json" } } }));
+	writeFileSync(path.join(c.work, ".omp", "plugin-overrides.json"), JSON.stringify({ settings: { "@nickf93/omp-automode": { rules: "not json" } } }));
 	const reloadInvalid = await noticesOf("/auto-review reload");
 	await c.run("Do step remove-f again.");
 	const invalid = bashResult(c, "rm target/f.log", 1);

@@ -18,15 +18,45 @@ model and reasoning effort are configurable.
 ## Installing
 
 ```bash
-omp plugin install github:NickF93/omp-automode#v0.2.0
+omp install @nickf93/omp-automode
+```
+
+To pin this release, use `omp install @nickf93/omp-automode@0.2.2`.
+
+Alternatively, install the tagged source from GitHub:
+
+```bash
+omp install github:NickF93/omp-automode#v0.2.2
 ```
 
 The `#v…` suffix pins a release; without it the default branch is installed.
-`--scope project` is not supported for `github:` installs (OMP installs them for
-the user). Remove it with `omp plugin uninstall omp-automode`, or turn it off
-with `/plugins disable omp-automode`. For one run without installing:
+OMP installs npm and GitHub packages for the user. `--scope project` is only
+supported for marketplace plugins, not these installs. Choose one installation
+source, not both.
+
+Remove the package with `omp plugin uninstall @nickf93/omp-automode`, or turn it
+off with `/plugins disable @nickf93/omp-automode`. For one run without installing:
 `omp -e /path/to/omp-automode`. When the plugin is not loaded, nothing is
 reviewed.
+
+### Migrating from the unscoped package
+
+1. **Before uninstalling**, record the old global settings: copy the values under
+   `settings["omp-automode"]` in `~/.omp/plugins/omp-plugins.lock.json`.
+   Uninstalling deletes those settings. Keep any backup outside the repository
+   and do not share it: custom policy text may contain private information.
+2. Remove the old GitHub installation with `omp plugin uninstall omp-automode`.
+   Leaving it installed alongside the scoped package can load the extension twice.
+3. Install `omp install @nickf93/omp-automode`.
+4. Reapply the recorded settings with
+   `omp plugin config set @nickf93/omp-automode <key> <value>` for each key,
+   quoting JSON values.
+5. In each project's `.omp/plugin-overrides.json`, rename the `settings`
+   key `omp-automode` to `@nickf93/omp-automode`, preserving its values.
+   Restart OMP after migrating.
+
+There is no automatic settings migration or fallback to the old key.
+The `/auto-review` commands and persisted session history identity are unchanged.
 
 ## How a tool call is handled
 
@@ -112,9 +142,22 @@ branch changes, and followed by subagents.
 ## Configuration
 
 Settings use OMP's plugin configuration: `/auto-review config` then
-`/auto-review save`, or `omp plugin config set omp-automode <key> <value>` in a
-shell (quote JSON values: `'[{"prefix":["git","status"],"decision":"allow"}]'`).
-Project overrides go in `.omp/plugin-overrides.json`.
+`/auto-review save`, or
+`omp plugin config set @nickf93/omp-automode <key> <value>` in a shell
+(quote JSON values: `'[{"prefix":["git","status"],"decision":"allow"}]'`).
+Project overrides go in `.omp/plugin-overrides.json`, for example:
+
+```json
+{
+  "settings": {
+    "@nickf93/omp-automode": {
+      "model": "anthropic/claude-sonnet-4-5",
+      "effort": "low",
+      "timeoutMs": 90000
+    }
+  }
+}
+```
 
 | Key | Default | Meaning |
 |---|---|---|

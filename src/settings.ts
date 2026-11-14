@@ -12,9 +12,8 @@ import { getConfigDirPaths } from "@oh-my-pi/pi-coding-agent/config";
 import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getPluginSettings, PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins";
+import { name as PLUGIN_NAME } from "../package.json";
 import { DEFAULT_TIMEOUT_MS } from "./policy";
-
-const PLUGIN_NAME = "omp-automode";
 
 export interface ShellRule {
 	prefix: string[];
