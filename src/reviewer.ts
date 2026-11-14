@@ -17,7 +17,7 @@ import {
 import { classify, Flag, is, isTransientStatus, status } from "@oh-my-pi/pi-ai/error";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { admit, type EvidenceSnapshot, estimateRequest, type PlannedAction } from "./context";
-import { defaultRationale, MAX_ATTEMPTS, RETRY_BASE_DELAY_MS } from "./policy";
+import { MAX_ATTEMPTS, RETRY_BASE_DELAY_MS, verdictPolicyError } from "./policy";
 import { INVESTIGATION_TOOLS, Sandbox, SandboxUnavailableError } from "./sandbox";
 import { AUTHORIZATIONS, isOneOf, isRecord, RISK_LEVELS, type Verdict } from "./state";
 
@@ -59,42 +59,26 @@ export class VerdictParseError extends Error {
 	override readonly name = "VerdictParseError";
 }
 
-/**
- * Accept the whole text as JSON, else the span from the first `{` to the last
- * `}`. Only `outcome` is required; absent or null fields take defaults, while
- * present invalid values fail the parse rather than becoming an allow.
- */
+/** Accept exactly one complete JSON verdict, without synthesizing assessments. */
 export function parseVerdict(text: string): Verdict {
 	let parsed: unknown;
 	try {
-		parsed = JSON.parse(text);
+		parsed = JSON.parse(text.trim());
 	} catch {
-		const start = text.indexOf("{");
-		const end = text.lastIndexOf("}");
-		if (start < 0 || end <= start) throw new VerdictParseError("reviewer answer was not JSON");
-		try {
-			parsed = JSON.parse(text.slice(start, end + 1));
-		} catch {
-			throw new VerdictParseError("reviewer answer was not valid JSON");
-		}
+		throw new VerdictParseError("reviewer answer was not valid JSON");
 	}
 	if (!isRecord(parsed)) throw new VerdictParseError("reviewer answer was not a JSON object");
 	const outcome = parsed.outcome;
 	if (outcome !== "allow" && outcome !== "deny") throw new VerdictParseError("reviewer answer has no valid outcome");
-	const risk = parsed.risk_level ?? (outcome === "allow" ? "low" : "high");
-	if (!isOneOf(RISK_LEVELS, risk)) throw new VerdictParseError("invalid risk_level");
-	const authorization = parsed.user_authorization ?? "unknown";
-	if (!isOneOf(AUTHORIZATIONS, authorization)) throw new VerdictParseError("invalid user_authorization");
+	const risk = parsed.risk_level;
+	if (!isOneOf(RISK_LEVELS, risk)) throw new VerdictParseError("missing or invalid risk_level");
+	const authorization = parsed.user_authorization;
+	if (!isOneOf(AUTHORIZATIONS, authorization)) throw new VerdictParseError("missing or invalid user_authorization");
 	const rationale = parsed.rationale;
-	if (rationale !== undefined && rationale !== null && typeof rationale !== "string") {
-		throw new VerdictParseError("invalid rationale");
+	if (typeof rationale !== "string" || !rationale.trim()) {
+		throw new VerdictParseError("rationale must be a nonblank string");
 	}
-	return {
-		outcome,
-		risk_level: risk,
-		user_authorization: authorization,
-		rationale: typeof rationale === "string" && rationale.trim() ? rationale.trim() : defaultRationale(outcome),
-	};
+	return { outcome, risk_level: risk, user_authorization: authorization, rationale: rationale.trim() };
 }
 
 // ---------------------------------------------------------------------------
@@ -249,7 +233,10 @@ async function runAttempt(
 				if (calls.length === 0) {
 					const text = response.content.map(part => (part.type === "text" ? part.text : "")).join("");
 					try {
-						return { kind: "verdict", verdict: parseVerdict(text), fingerprint: snapshot.trustFingerprint };
+						const verdict = parseVerdict(text);
+						const policyError = verdictPolicyError(verdict);
+						if (policyError) return { kind: "parse_error", detail: policyError };
+						return { kind: "verdict", verdict, fingerprint: snapshot.trustFingerprint };
 					} catch (error) {
 						return { kind: "parse_error", detail: (error as Error).message };
 					}

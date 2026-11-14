@@ -19,6 +19,8 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { Flag } from "@oh-my-pi/pi-ai/error";
 import type { EvidenceSnapshot, PlannedAction } from "../src/context";
+import { verdictPolicyError } from "../src/policy";
+import { AUTHORIZATIONS, RISK_LEVELS, type Verdict } from "../src/state";
 import { isRetryableResponse, parseVerdict, type ReviewRequest, review, VerdictParseError } from "../src/reviewer";
 
 const API = "omp-automode-test";
@@ -43,6 +45,13 @@ function reply(over: Partial<AssistantMessage>): AssistantMessage {
 }
 
 const text = (t: string): Partial<AssistantMessage> => ({ content: [{ type: "text", text: t }] });
+const complete = (over: Partial<Verdict> = {}) => text(JSON.stringify({
+	outcome: "allow",
+	risk_level: "low",
+	user_authorization: "unknown",
+	rationale: "Removes the requested local cleanup target; no additional trusted authorization was supplied.",
+	...over,
+}));
 const failure = (errorStatus: number | undefined, errorId?: number, errorMessage = "boom"): Partial<AssistantMessage> => ({
 	stopReason: "error",
 	errorStatus,
@@ -68,7 +77,7 @@ beforeAll(() => {
 			seen.push(structuredClone(context));
 			const step = script.shift();
 			queueMicrotask(() => {
-				const result = step ? step(context, options) : text('{"outcome":"allow"}');
+				const result = step ? step(context, options) : complete();
 				if (result === "hang") {
 					options?.signal?.addEventListener("abort", () =>
 						stream.push({ type: "error", reason: "aborted", error: reply({ stopReason: "aborted" }) }),
@@ -144,40 +153,70 @@ async function run(steps: Step[], over: Partial<ReviewRequest> = {}) {
 }
 
 describe("verdict parsing", () => {
-	test("strict JSON and JSON wrapped in prose", () => {
-		expect(parseVerdict('{"outcome":"deny","risk_level":"high","user_authorization":"low","rationale":"wipes data"}')).toEqual({
-			outcome: "deny",
-			risk_level: "high",
-			user_authorization: "low",
-			rationale: "wipes data",
+	const valid = { outcome: "allow", risk_level: "low", user_authorization: "unknown", rationale: "  Reads local status; no trusted approval was supplied.  " } as const;
+
+	test("complete low/unknown assessment is retained, trimmed and stripped of extra fields", () => {
+		expect(parseVerdict(JSON.stringify({ ...valid, extra: "ignored" }))).toEqual({
+			...valid,
+			rationale: valid.rationale.trim(),
 		});
-		expect(parseVerdict('Here you go: {"outcome":"allow"} thanks').outcome).toBe("allow");
 	});
 
-	test("missing or null fields take outcome-specific defaults", () => {
-		const allow = parseVerdict('{"outcome":"allow","risk_level":null}');
-		expect([allow.risk_level, allow.user_authorization]).toEqual(["low", "unknown"]);
-		const deny = parseVerdict('{"outcome":"deny","rationale":"  "}');
-		expect(deny.risk_level).toBe("high");
-		expect(deny.rationale.length).toBeGreaterThan(0);
+	for (const outcome of ["allow", "deny"]) {
+		for (const field of ["outcome", "risk_level", "user_authorization", "rationale"]) {
+			test(`${outcome}: ${field} must be explicitly supplied with the right type`, () => {
+				const base: Record<string, unknown> = { ...valid, outcome };
+				const missing = { ...base };
+				delete missing[field];
+				const error = field === "rationale" ? "rationale must be a nonblank string"
+					: field === "outcome" ? "reviewer answer has no valid outcome" : `missing or invalid ${field}`;
+				for (const value of [missing, { ...base, [field]: null }, { ...base, [field]: 5 }, { ...base, [field]: {} }]) {
+					expect(() => parseVerdict(JSON.stringify(value))).toThrow(error);
+				}
+			});
+		}
+		test(`${outcome}: blank rationales are rejected`, () => {
+			for (const rationale of ["", " \n\t "]) {
+				expect(() => parseVerdict(JSON.stringify({ ...valid, outcome, rationale }))).toThrow("rationale must be a nonblank string");
+			}
+		});
+	}
+
+	test.each([
+		["prose", "I think this is fine"],
+		["malformed JSON", "{bad"],
+		["wrapped object", `Here you go: ${JSON.stringify(valid)} thanks`],
+		["fenced object", `\`\`\`json\n${JSON.stringify(valid)}\n\`\`\``],
+		["trailing object", `${JSON.stringify(valid)} {}`],
+	])("%s is not strict JSON", (_name, raw) => {
+		expect(() => parseVerdict(raw)).toThrow("reviewer answer was not valid JSON");
 	});
 
-	test("explicit fields are kept and extra fields tolerated", () => {
-		const v = parseVerdict('{"outcome":"allow","risk_level":"high","user_authorization":"high","rationale":"ok","extra":1}');
-		expect([v.risk_level, v.user_authorization]).toEqual(["high", "high"]);
+	test.each(["[]", "null", "true", "1", '"allow"'])("%s is not an object", raw => {
+		expect(() => parseVerdict(raw)).toThrow("reviewer answer was not a JSON object");
 	});
 
 	test.each([
-		["prose only", "I think this is fine"],
-		["missing outcome", '{"risk_level":"low"}'],
-		["invalid outcome", '{"outcome":"maybe"}'],
-		["invalid risk", '{"outcome":"allow","risk_level":"tiny"}'],
-		["invalid authorization", '{"outcome":"allow","user_authorization":"yes"}'],
-		["non-string rationale", '{"outcome":"allow","rationale":5}'],
-		["array", "[1]"],
-	])("%s fails instead of allowing", (_name, raw) => {
-		expect(() => parseVerdict(raw)).toThrow(VerdictParseError);
+		["outcome", "maybe"], ["risk_level", "tiny"], ["user_authorization", "yes"],
+	])("invalid %s enum fails", (field, value) => {
+		expect(() => parseVerdict(JSON.stringify({ ...valid, [field]: value }))).toThrow(VerdictParseError);
 	});
+});
+
+describe("mandatory verdict policy floor", () => {
+	for (const risk_level of RISK_LEVELS) {
+		for (const user_authorization of AUTHORIZATIONS) {
+			for (const outcome of ["allow", "deny"] as const) {
+				test(`${risk_level}/${user_authorization}/${outcome}`, () => {
+					const error = outcome === "deny" ? undefined
+						: risk_level === "critical" ? "critical risk cannot be allowed"
+						: risk_level === "high" && (user_authorization === "low" || user_authorization === "unknown")
+							? "high risk requires medium or high authorization" : undefined;
+					expect(verdictPolicyError({ risk_level, user_authorization, outcome })).toBe(error);
+				});
+			}
+		}
+	}
 });
 
 describe("retry classification", () => {
@@ -195,13 +234,67 @@ describe("retry classification", () => {
 
 describe("review attempts", () => {
 	test("a direct verdict completes in one attempt", async () => {
-		const result = await run([() => text('{"outcome":"allow"}')]);
+		const result = await run([() => complete()]);
 		expect(result.kind).toBe("verdict");
 		expect(result.stats).toMatchObject({ attempts: 1, samplingRequests: 1, checkpointRestarts: 0 });
 	});
 
+	test("compact allow retries and returns only the corrected complete assessment", async () => {
+		const result = await run([() => text('{"outcome":"allow"}'), () => complete({ rationale: "Removes regenerable scratch output; trusted instructions request cleanup." })]);
+		expect(result).toMatchObject({
+			kind: "verdict",
+			verdict: { risk_level: "low", user_authorization: "unknown", rationale: "Removes regenerable scratch output; trusted instructions request cleanup." },
+			stats: { attempts: 2 },
+		});
+		expect(JSON.stringify(seen[1])).toContain("missing or invalid risk_level");
+	});
+
+	test("three compact answers fail technically without fabricating a denial", async () => {
+		const result = await run(Array.from({ length: 3 }, () => () => text('{"outcome":"allow"}')));
+		expect(result).toMatchObject({ kind: "failure", stats: { attempts: 3, samplingRequests: 3 } });
+		expect(result).not.toHaveProperty("verdict");
+	});
+
+	test.each([
+		["critical", "high", "critical risk cannot be allowed"],
+		["high", "unknown", "high risk requires medium or high authorization"],
+		["high", "low", "high risk requires medium or high authorization"],
+	] as const)("%s/%s allow retries with a sanitized policy error", async (risk_level, user_authorization, error) => {
+		const rejected = { risk_level, user_authorization, rationale: "PRIVATE-REJECTED-REPLY-MARKER" };
+		const corrected = await run([
+			() => complete(rejected),
+			() => complete({ outcome: "deny", risk_level, user_authorization, rationale: "The action would expose protected data without sufficient trusted approval." }),
+		]);
+		expect(corrected).toMatchObject({ kind: "verdict", verdict: { outcome: "deny", risk_level, user_authorization }, stats: { attempts: 2 } });
+		expect(JSON.stringify(seen[1])).toContain(error);
+		expect(JSON.stringify(seen[1])).not.toContain(rejected.rationale);
+		const failed = await run(Array.from({ length: 3 }, () => () => complete(rejected)));
+		expect(failed).toMatchObject({ kind: "failure", detail: `${error} after 3 attempts`, stats: { attempts: 3 } });
+		expect(failed).not.toHaveProperty("verdict");
+	});
+
+	test("invalid field retry feedback names the field without retaining the reply", async () => {
+		const result = await run([
+			() => text('{"outcome":"allow","rationale":"PRIVATE-MISSING-FIELD-MARKER"}'),
+			() => complete(),
+		]);
+		expect(result.kind).toBe("verdict");
+		expect(JSON.stringify(seen[1])).toContain("missing or invalid risk_level");
+		expect(JSON.stringify(seen[1])).not.toContain("PRIVATE-MISSING-FIELD-MARKER");
+	});
+
+	test.each(["medium", "high"] as const)("high risk with %s authorization remains an allow", async user_authorization => {
+		const result = await run([() => complete({ risk_level: "high", user_authorization, rationale: "Merges the bounded reviewed PR into protected main under trusted user approval." })]);
+		expect(result).toMatchObject({ kind: "verdict", verdict: { outcome: "allow", risk_level: "high", user_authorization }, stats: { attempts: 1 } });
+	});
+
+	test.each(["low", "medium"] as const)("specific %s-risk denials are not rewritten", async risk_level => {
+		const result = await run([() => complete({ outcome: "deny", risk_level, user_authorization: "high", rationale: "The user specifically forbids this otherwise routine local write." })]);
+		expect(result).toMatchObject({ kind: "verdict", verdict: { outcome: "deny", risk_level }, stats: { attempts: 1 } });
+	});
+
 	test("malformed answers retry, up to three attempts", async () => {
-		const ok = await run([() => text("hmm"), () => text("{bad"), () => text('{"outcome":"deny","rationale":"no"}')]);
+		const ok = await run([() => text("hmm"), () => text("{bad"), () => complete({ outcome: "deny", rationale: "Deletes files outside the user's cleanup request." })]);
 		expect(ok.kind === "verdict" && ok.verdict.outcome).toBe("deny");
 		expect(ok.stats.attempts).toBe(3);
 		const failed = await run([() => text("a"), () => text("b"), () => text("c")]);
@@ -210,7 +303,7 @@ describe("review attempts", () => {
 	});
 
 	test("transient service failures retry; nonretryable and unclassified failures do not", async () => {
-		const recovered = await run([() => failure(503), () => text('{"outcome":"allow"}')]);
+		const recovered = await run([() => failure(503), () => complete()]);
 		expect(recovered.kind).toBe("verdict");
 		expect(recovered.stats.attempts).toBe(2);
 		const bad = await run([() => failure(400, undefined, "bad request")]);
@@ -233,7 +326,7 @@ describe("review attempts", () => {
 		const bound = async (compat: Record<string, unknown> | undefined) => {
 			let options: SimpleStreamOptions | undefined;
 			const model = { ...scriptedModel(), ...(compat ? { compat } : {}) } as Model<Api>;
-			await run([(_c, o) => ((options = o), text('{"outcome":"allow"}'))], { model, timeoutMs: 90_000 });
+			await run([(_c, o) => ((options = o), complete())], { model, timeoutMs: 90_000 });
 			return [options?.streamFirstEventTimeoutMs, options?.streamIdleTimeoutMs];
 		};
 		expect(await bound(undefined)).toEqual([45_000, 45_000]);
@@ -263,9 +356,9 @@ describe("review attempts", () => {
 			[
 				() => {
 					fingerprint = "g";
-					return text('{"outcome":"allow"}');
+					return complete();
 				},
-				() => text('{"outcome":"deny","rationale":"user revoked"}'),
+				() => complete({ outcome: "deny", rationale: "Deletes the target after the user revoked permission." }),
 			],
 			{ capture: () => snapshot(fingerprint) },
 		);
@@ -296,7 +389,7 @@ describe("sandboxed investigation", () => {
 				expect(output).not.toContain("dns=0");
 				expect(output).not.toContain("systemd=0");
 				expect(output).toContain("bus=none agent=none run=0");
-				return text('{"outcome":"deny","risk_level":"high","rationale":"deletes data"}');
+				return complete({ outcome: "deny", risk_level: "high", rationale: "Deletes user data without trusted approval." });
 			},
 		]);
 		expect(result.kind).toBe("verdict");
@@ -319,7 +412,7 @@ describe("sandboxed investigation", () => {
 				expect(output).toContain("exit_code: 0");
 				return toolCall("exec_command", { cmd: "sleep 30", yield_time_ms: 50 });
 			},
-			() => text('{"outcome":"allow"}'),
+			() => complete(),
 		]);
 		expect(sessionId).toBeGreaterThan(0);
 		expect(result.kind).toBe("verdict");
@@ -342,7 +435,7 @@ describe("sandboxed investigation", () => {
 			},
 			context => {
 				expect(JSON.stringify((context.messages.at(-1) as ToolResultMessage).content)).toContain("one");
-				return text('{"outcome":"allow"}');
+				return complete();
 			},
 		]);
 		expect(result.kind).toBe("verdict");
@@ -352,7 +445,7 @@ describe("sandboxed investigation", () => {
 		const result = await run([
 			() => toolCall("exec_command", { cmd: "echo look" }),
 			() => failure(400, Flag.ContextOverflow, "prompt is too long"),
-			() => text('{"outcome":"allow"}'),
+			() => complete(),
 		]);
 		expect(result.kind).toBe("verdict");
 		expect(result.stats).toMatchObject({ attempts: 1, checkpointRestarts: 1, samplingRequests: 3 });
@@ -368,7 +461,7 @@ describe("sandboxed investigation", () => {
 		const result = await run(
 			[
 				() => toolCall("exec_command", { cmd: "head -c 3000 /dev/zero | tr '\\0' x" }),
-				() => text('{"outcome":"allow"}'),
+				() => complete(),
 			],
 			{ model: scriptedModel(4_200), capture: bulky },
 		);
@@ -384,7 +477,7 @@ describe("sandboxed investigation", () => {
 			...snapshot(),
 			transcript: [0, 1, 2].map(i => ({ cls: "tool" as const, label: `old ${i}`, text: String(i).repeat(3600) })),
 		});
-		const result = await run([() => failure(400, Flag.ContextOverflow), () => text('{"outcome":"allow"}')], { capture: bulky });
+		const result = await run([() => failure(400, Flag.ContextOverflow), () => complete()], { capture: bulky });
 		expect(result.kind).toBe("verdict");
 		expect(JSON.stringify((seen.at(-1) as Context).messages[0]?.content)).toContain("older transcript entries were omitted");
 		const twice = await run([() => failure(400, Flag.ContextOverflow), () => failure(400, Flag.ContextOverflow)]);

@@ -12,6 +12,7 @@ import {
 	BREAKER_CONSECUTIVE_DENIALS,
 	BREAKER_WINDOW,
 	BREAKER_WINDOW_DENIALS,
+	type VERDICT_CONTRACT_VERSION,
 } from "./policy";
 import { hasOverrides, parseRules, parseTimeout, type SessionOverrides, type ShellRule } from "./settings";
 
@@ -50,6 +51,11 @@ export interface ResultEntry {
 	result: ResultKind;
 	verdict?: Verdict;
 	detail?: string;
+	provenance?: {
+		packageVersion: string;
+		verdictContract: typeof VERDICT_CONTRACT_VERSION;
+		instructionsSha256: string;
+	};
 	attempts: number;
 	checkpointRestarts: number;
 	samplingRequests: number;

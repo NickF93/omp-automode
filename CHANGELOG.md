@@ -6,6 +6,30 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-11-14
+
+### Fixed
+
+- Require complete, explicit verdict metadata and action-specific rationales;
+  malformed replies and contradictory critical/high-risk allows retry, then
+  block as technical failures. Custom policy cannot weaken this core floor.
+- Always display supplied risk, authorization (including unknown) and rationale.
+- Clarify intrinsic protected-branch risk, read-only Git inspection and local
+  packaging versus public payload disclosure.
+
+### Added
+
+- Sanitized result provenance: package version, complete-verdict contract version
+  and SHA-256 of the exact reviewer instructions; historical results remain
+  replayable and are labeled legacy in review evidence.
+- Opt-in three-arm frozen-input evaluation: plugin Sonnet 5.5 and explicitly
+  requested GPT-6.1 at low effort plus the native Codex automatic approval
+  reviewer baseline, with 84 sequential assessments. The separate 56-review
+  scripted smoke never invokes native providers. Reports distinguish plugin
+  gating from native skips/unavailability and non-identical prompt conditions.
+  Risk bands tolerate classification variation while preserving required denials;
+  provider refusals and native skips remain explicit non-assessments.
+
 ## [0.2.2] - 2026-11-14
 
 ### Changed
@@ -122,7 +146,8 @@ run, so the agent can work without per-action approval prompts.
   the only check; choose a capable model.
 - Pinned to OMP 18.19.0 through imports of host internals.
 
-[Unreleased]: https://github.com/NickF93/omp-automode/compare/v0.2.2...develop
+[Unreleased]: https://github.com/NickF93/omp-automode/compare/v0.2.3...develop
+[0.2.3]: https://github.com/NickF93/omp-automode/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/NickF93/omp-automode/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/NickF93/omp-automode/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/NickF93/omp-automode/releases/tag/v0.2.0

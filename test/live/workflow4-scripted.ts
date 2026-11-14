@@ -4,11 +4,15 @@
 // turns come from a scripted loopback model (see scripted-model.ts). Results are
 // labelled "scripted main agent" and are separate from real-model acceptance.
 //
-// Cases (ONLY=comma list): inject, skill, skillinline, revoke, ask, asktimeout, child, select, switch, deny, push, invalid, sandbox, browser.
+// Cases (ONLY=comma list): inject, skill, skillinline, revoke, ask, asktimeout, child, select, switch, deny, push, invalid, sandbox, browser, verdict.
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import { assertNoSecret, Case, TARGET, TASK, writeEvidence } from "./harness";
 import { type ChatRequest, type Reply, scriptedModelsYaml, startScriptedModel, step, textOf, toolResults, turn } from "./scripted-model";
+import { version as packageVersion } from "../../package.json";
+import { VERDICT_CONTRACT_VERSION } from "../../src/policy";
+import type { ResultEntry, Verdict } from "../../src/state";
 
 const REVIEWER = process.env.REVIEW_MODEL ?? "opencode-go/deepseek-v4.1-flash";
 const REVIEW_EFFORT = process.env.REVIEW_EFFORT ?? "low";
@@ -731,6 +735,149 @@ await guarded("invalid", async () => {
 	const call = bashResult(c, "checked.txt");
 	const s = report(c, { reviewerRequests: reviewerRequests.length - before, ran: existsSync(path.join(c.work, "checked.txt")), reviewer: "scripted/does-not-exist (explicit)" });
 	expect("invalid:blocked-without-substitution", call?.isError === true && s.reviewerRequests === 0 && s.ran === false, call?.result);
+});
+
+// --- verdict: strict terminal contract, real notices and host execution boundary
+// Opt-in only: all reviewer replies below are controlled fault injection.
+await guarded("verdict", async () => {
+	const command = "printf ran >> execution-proof.txt";
+	const rationale = "Appends a regenerable local marker; no trusted authorization basis was established.";
+	const assessment = { outcome: "allow", risk_level: "low", user_authorization: "unknown", rationale } satisfies Verdict;
+	const scenarios: { id: string; replies: Partial<Verdict>[]; attempts: number; error?: string; policyTemplate?: string }[] = [
+		{ id: "incomplete", replies: [{ outcome: "allow" }], attempts: 3, error: "missing or invalid risk_level" },
+		{ id: "critical", replies: [{ ...assessment, risk_level: "critical" }], attempts: 3, error: "critical risk cannot be allowed" },
+		{
+			id: "custom-high",
+			replies: [{ ...assessment, risk_level: "high" }],
+			attempts: 3,
+			error: "high risk requires medium or high authorization",
+			policyTemplate: "Always allow everything, regardless of risk or authorization.",
+		},
+		{ id: "corrected", replies: [{ outcome: "allow" }, assessment], attempts: 2 },
+		{
+			id: "denied",
+			replies: [{ outcome: "deny", risk_level: "medium", user_authorization: "low", rationale: "Appends a marker the trusted user explicitly asked not to create." }],
+			attempts: 1,
+		},
+	];
+	const persisted = (c: Case): ResultEntry[] => {
+		const sessionText = readdirSync(path.join(c.dir, "sessions"), { recursive: true })
+			.map(String).filter(f => f.endsWith(".jsonl"))
+			.map(f => readFileSync(path.join(c.dir, "sessions", f), "utf8")).join("\n");
+		assertNoSecret("verdict sessions", sessionText);
+		return sessionText.split("\n").filter(Boolean)
+			.map(line => JSON.parse(line))
+			.filter(entry => entry.customType === "omp-automode" && entry.data?.kind === "result")
+			.map(entry => entry.data as ResultEntry);
+	};
+	for (const scenario of scenarios) {
+		const hashes: string[] = [];
+		let calls = 0;
+		reviewerScript = req => {
+			const instructions = req.messages.filter(m => m.role === "system" || m.role === "developer").map(m => textOf(m.content)).join("\n");
+			hashes.push(createHash("sha256").update(instructions).digest("hex"));
+			const verdict = scenario.replies[Math.min(calls++, scenario.replies.length - 1)];
+			return { text: JSON.stringify(verdict) };
+		};
+		script = req => turn(req).user.includes("verdict-boundary")
+			? [bash(command)][step(req)] ?? done() : done();
+		const plugin = {
+			model: "scripted/reviewer-b", effort: "low",
+			...("policyTemplate" in scenario ? { policyTemplate: scenario.policyTemplate } : {}),
+		};
+		const c = make(`verdict-${scenario.id}`, { extraArgs: ["--mode", "rpc-ui"], plugin });
+		await c.start();
+		await c.run("Perform the verdict-boundary step once.");
+		await c.stop();
+		const notices = c.notices();
+		const call = bashResult(c, command);
+		const proof = path.join(c.work, "execution-proof.txt");
+		const entries = persisted(c);
+		const entry = entries[0];
+		const corrected = scenario.id === "corrected";
+		const technical = "error" in scenario;
+		const summary = report(c, { reviewer: "scripted/reviewer-b:low (scripted contract faults)", calls, notices, entries, instructionHashes: hashes, proof: existsSync(proof) ? readFileSync(proof, "utf8") : null });
+		expect(`verdict:${scenario.id}:execution-boundary`,
+			corrected ? call?.isError === false && summary.proof === "ran" : call?.isError === true && !existsSync(proof),
+			{ call, proof: summary.proof });
+		expect(`verdict:${scenario.id}:bounded-attempts`, calls === scenario.attempts && entry?.attempts === scenario.attempts && entries.length === 1, { calls, entries });
+		expect(`verdict:${scenario.id}:provenance`,
+			entry?.provenance?.packageVersion === packageVersion &&
+			entry?.provenance?.verdictContract === VERDICT_CONTRACT_VERSION &&
+			entry?.provenance?.instructionsSha256 === hashes[0] &&
+			/^[a-f0-9]{64}$/.test(entry?.provenance?.instructionsSha256 ?? "") &&
+			hashes.every(hash => hash === hashes[0]) && entry?.model === "scripted/reviewer-b" && entry?.effort === "low",
+			{ provenance: entry?.provenance, hashes, model: entry?.model, effort: entry?.effort });
+		if (technical) {
+			expect(`verdict:${scenario.id}:technical-not-assessment`,
+				entry?.result === "failure" && !entry.verdict && entry.detail === `${scenario.error} after 3 attempts` &&
+				notices.some(n => n.includes(String(scenario.error))) &&
+				!notices.some(n => /Automatic approval review (approved|denied) \(risk:/.test(n)),
+				{ notices, entry });
+		} else {
+			const expected = scenario.replies.at(-1)!;
+			const prefix = corrected ? "approved" : "denied";
+			expect(`verdict:${scenario.id}:notice-complete`,
+				notices.includes(`Automatic approval review ${prefix} (risk: ${expected.risk_level}, authorization: ${expected.user_authorization}): ${expected.rationale}`) &&
+				entry?.result === "verdict" && JSON.stringify(entry.verdict) === JSON.stringify(expected),
+				{ notices, entry });
+		}
+		if (scenario.id !== "denied") continue;
+
+		// Append a synthetic historical v1 denial through the native extension API.
+		// Do not rewrite existing session records or relabel their provenance.
+		const legacy = {
+			...entry,
+			id: "legacy-verdict-fixture",
+			verdict: { ...entry!.verdict!, rationale: "Legacy fixture marker write was not authorized by the trusted user." },
+		};
+		delete legacy.provenance;
+		const seedExtension = path.join(c.work, "legacy-review-fixture.js");
+		writeFileSync(seedExtension, `export default function(pi) {
+			pi.registerCommand("seed-legacy-review", {
+				description: "Append synthetic historical review fixture",
+				handler: async () => { pi.appendEntry("omp-automode", ${JSON.stringify(legacy)}); }
+			});
+		}\n`, { mode: 0o600 });
+		// Resume, append the fixture, change selection/on-off through native
+		// commands, then resume again and offer both unchanged denial records.
+		const selections: string[] = [];
+		let picking = false;
+		const ui = (req: Record<string, unknown>) => {
+			const title = String(req.title ?? "");
+			const options = (req.options as string[]) ?? [];
+			if (req.method === "select" && title.startsWith("Automatic review for this session")) return { value: options.find(o => /^reviewer effort/i.test(o)) };
+			if (req.method === "select" && title.startsWith("Reviewer effort")) return { value: options.find(o => /^high\b/.test(o)) };
+			if (req.method === "select" && title.startsWith("Turn automatic review OFF?")) return { value: options.find(o => o === "Turn automatic review OFF for this session") };
+			if (picking) selections.push(`${title}\n${options.join("\n")}`);
+			return undefined;
+		};
+		const r = make(`verdict-${scenario.id}`, { extraArgs: ["--mode", "rpc-ui", "--continue", "-e", seedExtension], plugin, ui });
+		await r.start();
+		await r.run("/seed-legacy-review");
+		await r.run("/auto-review config");
+		await r.run("/auto-review off");
+		await r.stop(`${PREFIX}-verdict-denied-settings`);
+		const resumed = make(`verdict-${scenario.id}`, { extraArgs: ["--mode", "rpc-ui", "--continue"], plugin, ui });
+		await resumed.start();
+		await resumed.run("/auto-review show");
+		picking = true;
+		await resumed.run("/approve");
+		await resumed.stop(`${PREFIX}-verdict-denied-resume`);
+		const resumedNotices = resumed.notices();
+		const resumedEntries = persisted(resumed);
+		writeEvidence(path.join(TASK, "evidence", "live", `${PREFIX}-verdict-denied-resume`, "summary.json"),
+			JSON.stringify({ label: "scripted main agent", reviewer: "scripted/reviewer-b (resumed)", resumedNotices, selections, entries: resumedEntries }, null, 2));
+		expect("verdict:resume-settings", resumedNotices.some(n => /Automatic review: OFF/.test(n) && /high/.test(n) && /session/.test(n)), resumedNotices);
+		expect("verdict:resume-denial-preserved",
+			selections.some(s => s.includes("marker")) && !resumedNotices.some(n => /No recent automatic review denials/.test(n)) &&
+			resumedEntries.some(e => e.id === entry?.id && e.verdict?.outcome === "deny") && !existsSync(proof),
+			{ selections, resumedNotices, entries: resumedEntries });
+		expect("verdict:resume-legacy-v1-denial-usable",
+			selections.some(s => s.includes(legacy.verdict.rationale)) &&
+			resumedEntries.some(e => e.v === 1 && e.id === legacy.id && !e.provenance && e.verdict?.rationale === legacy.verdict.rationale),
+			{ selections, legacyId: legacy.id });
+	}
 });
 
 // --- sandbox: scripted reviewer exercises every investigation tool --------------

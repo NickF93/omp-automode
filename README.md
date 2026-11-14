@@ -21,12 +21,12 @@ model and reasoning effort are configurable.
 omp install @nickf93/omp-automode
 ```
 
-To pin this release, use `omp install @nickf93/omp-automode@0.2.2`.
+To pin this release, use `omp install @nickf93/omp-automode@0.2.3`.
 
 Alternatively, install the tagged source from GitHub:
 
 ```bash
-omp install github:NickF93/omp-automode#v0.2.2
+omp install github:NickF93/omp-automode#v0.2.3
 ```
 
 The `#v…` suffix pins a release; without it the default branch is installed.
@@ -82,12 +82,11 @@ reviewed rather than blocked.
 
 ### Review outcomes
 
-- **Allow**: the action runs and a notice shows risk, authorization and the
-  reason. A short allow from the reviewer (low risk, no authorization rating)
-  shows only the risk.
+- **Allow**: the action runs and a notice shows the supplied risk, authorization
+  and action-specific rationale, including explicit `unknown` authorization.
 - **Deny**: the action does not run. The agent is told not to work around the
   denial, to choose a safer route or ask you, and to retry only after your
-  informed approval.
+  informed approval. Denials also show all three assessment attributes.
 - **Failure or timeout**: the action does not run, and the agent is told this
   is not a finding that the action is unsafe. A model request that stays
   silent for half of `timeoutMs` counts as stalled and is retried within the
@@ -97,6 +96,21 @@ reviewed rather than blocked.
 - **Context too large**: when the action and its minimum evidence cannot fit
   the reviewer model's context, you are asked to confirm that exact call
   manually; without an interactive answer it stays blocked.
+
+Every accepted verdict must explicitly supply `risk_level`, `user_authorization`,
+`outcome` and a nonblank rationale. Missing, malformed or policy-inconsistent
+replies retry within the existing three-attempt deadline, then block as technical
+failures, not policy denials. Explicit `unknown` is a valid assessment, not missing
+data. Field completeness and the core decision table are enforced locally;
+semantic classification, authorization scope and explanation quality remain
+model-dependent. An authorized protected/default-branch mutation is still high
+risk; read-only inspection is not a mutation.
+
+New results record the package version, `complete-v1` contract marker and
+SHA-256 of the exact reviewer instructions, not raw replies or private reasoning.
+Existing session records still replay; earlier reviews without that marker are
+labeled legacy because field completeness was not recorded. Provenance and prior
+decisions are context, never trusted authorization.
 
 Three consecutive denials, or ten denials among the last fifty reviews in one
 run, interrupt the run so you can redirect it.
@@ -168,6 +182,13 @@ Project overrides go in `.omp/plugin-overrides.json`, for example:
 | `policy` | built-in | Replaces the security policy section |
 | `extraPolicy` | empty | Added after the security policy |
 | `policyTemplate` | built-in | Replaces the whole template; it may use `{{ tenant_policy_config }}` and `{{ extra_policy }}` |
+
+Custom policy/template/extra policy may add restrictions but cannot weaken the
+mandatory complete-output contract or core floor: critical risk never allows,
+and high risk allows only with medium or high authorization (plus the policy's
+scope and specific-rule requirements). Low/medium risk can allow with explicit
+unknown authorization when no denial rule applies; no new approval ceremony is
+imposed.
 
 An unavailable model or an effort the model does not support is reported as a
 review failure; the plugin never substitutes another model.

@@ -25,6 +25,7 @@ import {
 	TOOL_AGGREGATE_MAX_TOKENS,
 	TOOL_ENTRY_MAX_TOKENS,
 	TRUNCATION_MARKER,
+	VERDICT_CONTRACT_VERSION,
 } from "./policy";
 import { canonicalJson, ENTRY_TYPE, isRecord } from "./state";
 
@@ -290,9 +291,12 @@ function collect(branch: readonly RawEntry[], options: CaptureOptions): Collecte
 				const summary = verdict
 					? `${String(verdict.outcome)} (risk ${String(verdict.risk_level)}, authorization ${String(verdict.user_authorization)}): ${String(verdict.rationale)}`
 					: `${String(data.result)}${typeof data.detail === "string" ? `: ${data.detail}` : ""}`;
+				const legacy = isRecord(data.provenance) && data.provenance.verdictContract === VERDICT_CONTRACT_VERSION
+					? ""
+					: "legacy review; field completeness not recorded; ";
 				priorReviews.push(
 					truncateMiddle(
-						`Action ${canonicalJson({ tool: data.action.tool, input: data.action.input })} -> ${summary}`,
+						`${legacy}Action ${canonicalJson({ tool: data.action.tool, input: data.action.input })} -> ${summary}`,
 						PRIOR_REVIEW_MAX_TOKENS * BYTES_PER_TOKEN,
 					),
 				);
