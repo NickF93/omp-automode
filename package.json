@@ -1,6 +1,6 @@
 {
 	"name": "@nickf93/omp-automode",
-	"version": "0.2.2",
+	"version": "0.2.3",
 	"description": "OMP plugin: an independent AI reviewer allows or blocks each risky tool call before it runs.",
 	"license": "MIT",
 	"type": "module",
