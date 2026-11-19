@@ -29,8 +29,22 @@ jobs:
 
       - name: Install bubblewrap
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bubblewrap
+          ubuntu_sources="$RUNNER_TEMP/omp-automode-ubuntu.sources"
+          cat > "$ubuntu_sources" <<'SOURCES'
+          Types: deb
+          URIs: https://mirrors.edge.kernel.org/ubuntu/
+          Suites: noble noble-updates noble-security
+          Components: main
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          SOURCES
+          apt_options=(
+            -o "Dir::Etc::sourcelist=$ubuntu_sources"
+            -o Dir::Etc::sourceparts=-
+            -o Acquire::Languages=none
+            -o Acquire::https::Timeout=15
+          )
+          sudo apt-get "${apt_options[@]}" update --error-on=any
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends bubblewrap
 
           if [[ $(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true) == 1 ]] &&
              ! bwrap --unshare-user --unshare-net --ro-bind / / -- /usr/bin/true; then
