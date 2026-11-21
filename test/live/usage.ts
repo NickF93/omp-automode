@@ -48,6 +48,7 @@ try {
 	assert(before.autoReview.measuredAttempts >= (withChild ? 2 : 1), JSON.stringify(before));
 	assert.equal(before.autoReview.unmeasuredAttempts, 0);
 	assert(before.autoReview.meters.totalTokens > 0);
+	assert(before.total);
 	assert.equal(before.total.totalTokens, before.native.totalTokens + before.autoReview.meters.totalTokens);
 	assert.equal(before.total.usd, before.native.usd + before.autoReview.meters.usd);
 	const { sessionFile } = await c.client.getSessionStats();

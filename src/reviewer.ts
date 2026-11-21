@@ -196,7 +196,9 @@ async function runAttempt(
 						},
 					);
 				} catch (error) {
-					if (nativeAttempts === 0) req.recordUsage?.(usageSample(req.model, undefined));
+					// A thrown completion can fail before dispatch or between SDK retries.
+					// A completed provider attempt is only confirmed by onAttempt.
+					if (!signal.aborted || nativeAttempts === 0) req.recordUsage?.(usageSample(req.model, undefined));
 					counters.samplingRequests += Math.max(1, nativeAttempts);
 					if (signal.aborted) return { kind: "aborted" };
 					const code = status(error);
@@ -209,7 +211,6 @@ async function runAttempt(
 						retryAfterMs: extractProviderRetryHint(req.model.provider, message),
 					};
 				}
-				if (nativeAttempts === 0) req.recordUsage?.(usageSample(req.model, response));
 				counters.samplingRequests += Math.max(1, nativeAttempts);
 				if (response.stopReason === "aborted" || signal.aborted) return { kind: "aborted" };
 				if (response.stopReason === "error") {

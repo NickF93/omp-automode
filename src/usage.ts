@@ -80,10 +80,14 @@ function emptyMeters(): Meters {
 }
 
 function bucket() {
-	return { measuredAttempts: 0, unmeasuredAttempts: 0, meters: emptyMeters() };
+	return { measuredAttempts: 0, unmeasuredAttempts: 0, unobservedCompletions: 0, meters: emptyMeters() };
 }
 
-function addSample(target: ReturnType<typeof bucket>, meters: Meters | null): void {
+function addSample(target: ReturnType<typeof bucket>, meters: Meters | null, outcome: unknown): void {
+	if (outcome === "unobserved") {
+		target.unobservedCompletions++;
+		return;
+	}
 	if (!meters) {
 		target.unmeasuredAttempts++;
 		return;
@@ -110,31 +114,43 @@ export function summarizeUsage(
 	const byModel = new Map<string, { provider: string; model: string } & ReturnType<typeof bucket>>();
 	const seen = new Set<string>();
 	let legacyAttempts = 0;
+	let inheritedReviewerHistory = false;
 	for (const entry of session.getEntries()) {
 		if (entry.type !== "custom" || !isRecord(entry.data)) continue;
 		const data = entry.data;
 		if (entry.customType === ENTRY_TYPE && data.kind === "result" && data.usageAccounting !== true &&
-			isRecord(data.action) && data.action.session === sessionId && nonnegative(data.samplingRequests)) {
-			legacyAttempts += data.samplingRequests;
+			isRecord(data.action) && typeof data.action.session === "string" && nonnegative(data.samplingRequests)) {
+			if (data.action.session === sessionId) legacyAttempts += data.samplingRequests;
+			else if (data.samplingRequests > 0) inheritedReviewerHistory = true;
 		}
-		if (entry.customType !== USAGE_ENTRY || data.v !== 1 || data.sessionId !== sessionId ||
+		if (entry.customType !== USAGE_ENTRY || data.v !== 1 || typeof data.sessionId !== "string" ||
 			typeof data.id !== "string" || typeof data.provider !== "string" || typeof data.model !== "string" ||
 			seen.has(data.id)) continue;
+		if (data.sessionId !== sessionId) {
+			inheritedReviewerHistory = true;
+			continue;
+		}
 		seen.add(data.id);
 		const meters = readMeters(data.meters);
-		addSample(autoReview, meters);
+		addSample(autoReview, meters, data.outcome);
 		const key = JSON.stringify([data.provider, data.model]);
 		let group = byModel.get(key);
 		if (!group) {
 			group = { provider: data.provider, model: data.model, ...bucket() };
 			byModel.set(key, group);
 		}
-		addSample(group, meters);
+		addSample(group, meters, data.outcome);
 	}
 	const total = emptyMeters();
 	for (const key of metrics) total[key] = native[key] + autoReview.meters[key];
 	total.premiumRequests = (native.premiumRequests ?? 0) + (autoReview.meters.premiumRequests ?? 0);
-	return { version: 1, native, autoReview: { ...autoReview, legacyAttempts, byModel: [...byModel.values()] }, total };
+	return {
+		version: 1,
+		native,
+		autoReview: { ...autoReview, legacyAttempts, byModel: [...byModel.values()] },
+		inheritedReviewerHistory,
+		total: inheritedReviewerHistory ? null : total,
+	};
 }
 
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 8 });
@@ -144,11 +160,14 @@ export function formatUsage(report: ReturnType<typeof summarizeUsage>): string {
 	const { autoReview } = report;
 	const m = autoReview.meters;
 	const lines = [
-		`Session total (observed) · ${display(report.total)}`,
+		report.total
+			? `Session total (observed) · ${display(report.total)}`
+			: "Combined total unavailable for copied review history. OMP and AutoMode use different fork accounting.",
 		`OMP native · ${display(report.native)}`,
 		`Auto-review · ${display(m)} · ${autoReview.measuredAttempts} measured, ${autoReview.unmeasuredAttempts} unmeasured, ${autoReview.legacyAttempts} historical attempts without usage`,
 		`  Input ${m.input} · output ${m.output} · cache read ${m.cacheRead} · cache write ${m.cacheWrite}`,
 	];
+	if (autoReview.unobservedCompletions) lines.push(`  Completion errors without per-attempt usage · ${autoReview.unobservedCompletions}`);
 	for (const group of autoReview.byModel) {
 		lines.push(`  ${group.provider}/${group.model} · ${display(group.meters)} · ${group.measuredAttempts} measured, ${group.unmeasuredAttempts} unmeasured`);
 	}
@@ -156,7 +175,7 @@ export function formatUsage(report: ReturnType<typeof summarizeUsage>): string {
 		["credits", "Auto-review credits"], ["committedCredits", "Auto-review committed credits"],
 		["acus", "Auto-review ACUs"], ["premiumRequests", "Premium requests (combined)"],
 	] as const) {
-		const value = key === "premiumRequests" ? report.total[key] : m[key];
+		const value = key === "premiumRequests" ? report.total?.[key] : m[key];
 		if (value) lines.push(`${label} · ${value}`);
 	}
 	return lines.join("\n");

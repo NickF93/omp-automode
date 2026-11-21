@@ -338,6 +338,7 @@ describe("review attempts", () => {
 
 	test("an external cancellation reports cancelled", async () => {
 		const controller = new AbortController();
+		const recorded: Parameters<NonNullable<ReviewRequest["recordUsage"]>>[0][] = [];
 		const result = await run(
 			[
 				() => {
@@ -345,9 +346,11 @@ describe("review attempts", () => {
 					return "hang";
 				},
 			],
-			{ signal: controller.signal },
+			{ signal: controller.signal, recordUsage: sample => recorded.push(sample) },
 		);
 		expect(result.kind).toBe("cancelled");
+		expect(recorded).toHaveLength(1);
+		expect(recorded[0]).toMatchObject({ outcome: "aborted", meters: null });
 	});
 
 	test("changed trusted instructions during review recapture without counting as a verdict", async () => {
@@ -512,4 +515,15 @@ test("accounts for each returned attempt before retrying or parsing the verdict"
 	expect(recorded.map(s => s.outcome)).toEqual(["error", "stop", "stop"]);
 	expect(recorded.map(s => s.meters?.totalTokens)).toEqual([6, 6, 6]);
 	expect(new Set(recorded.map(s => s.id)).size).toBe(3);
+});
+
+test("a thrown completion without a response is recorded as unobserved", async () => {
+	const recorded: Parameters<NonNullable<ReviewRequest["recordUsage"]>>[0][] = [];
+	const result = await review(request({
+		apiKey: () => { throw new Error("fixture resolver failure"); },
+		recordUsage: sample => recorded.push(sample),
+	}));
+	expect(result.kind).toBe("failure");
+	expect(recorded).toHaveLength(1);
+	expect(recorded[0]).toMatchObject({ outcome: "unobserved", meters: null });
 });
