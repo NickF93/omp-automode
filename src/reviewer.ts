@@ -21,6 +21,8 @@ import { MAX_ATTEMPTS, RETRY_BASE_DELAY_MS, verdictPolicyError } from "./policy"
 import { INVESTIGATION_TOOLS, Sandbox, SandboxUnavailableError } from "./sandbox";
 import { AUTHORIZATIONS, isOneOf, isRecord, RISK_LEVELS, type Verdict } from "./state";
 
+import { usageSample, type UsageTarget } from "./usage";
+
 interface ReviewStats {
 	attempts: number;
 	checkpointRestarts: number;
@@ -36,6 +38,7 @@ export type ReviewResult =
 	| { kind: "input_budget"; detail: string; stats: ReviewStats };
 
 export interface ReviewRequest {
+	recordUsage?: UsageTarget;
 	model: Model<Api>;
 	effort: string | undefined;
 	timeoutMs: number;
@@ -186,10 +189,14 @@ async function runAttempt(
 							...(stallMs === undefined ? {} : { streamFirstEventTimeoutMs: stallMs, streamIdleTimeoutMs: stallMs }),
 							...(req.effort ? { reasoning: req.effort as Effort } : {}),
 							// The transport may replay internally; each completed attempt is a sampling request.
-							onAttempt: () => nativeAttempts++,
+							onAttempt: message => {
+								nativeAttempts++;
+								req.recordUsage?.(usageSample(req.model, message));
+							},
 						},
 					);
 				} catch (error) {
+					if (nativeAttempts === 0) req.recordUsage?.(usageSample(req.model, undefined));
 					counters.samplingRequests += Math.max(1, nativeAttempts);
 					if (signal.aborted) return { kind: "aborted" };
 					const code = status(error);
@@ -202,6 +209,7 @@ async function runAttempt(
 						retryAfterMs: extractProviderRetryHint(req.model.provider, message),
 					};
 				}
+				if (nativeAttempts === 0) req.recordUsage?.(usageSample(req.model, response));
 				counters.samplingRequests += Math.max(1, nativeAttempts);
 				if (response.stopReason === "aborted" || signal.aborted) return { kind: "aborted" };
 				if (response.stopReason === "error") {

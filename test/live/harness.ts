@@ -34,6 +34,7 @@ export interface CaseOptions {
 	plugin?: Record<string, unknown>;
 	extraArgs?: string[];
 	loadPlugin?: boolean;
+	pluginPath?: string;
 	files?: Record<string, string>;
 	config?: string;
 	/** Agent-level models.yml, for custom loopback providers. */
@@ -113,7 +114,7 @@ export class Case {
 			"--cwd",
 			this.work,
 			"--no-extensions",
-			...(this.opts.loadPlugin === false ? [] : ["-e", TARGET]),
+			...(this.opts.loadPlugin === false ? [] : ["-e", this.opts.pluginPath ?? TARGET]),
 			"--approval-mode",
 			"yolo",
 			"--model",

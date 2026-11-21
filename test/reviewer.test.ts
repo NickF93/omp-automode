@@ -495,3 +495,21 @@ describe("sandboxed investigation", () => {
 		expect(result.stats.checkpointRestarts).toBe(1);
 	});
 });
+
+test("accounts for each returned attempt before retrying or parsing the verdict", async () => {
+	const usage = {
+		input: 3, output: 2, cacheRead: 1, cacheWrite: 0, totalTokens: 6,
+		cost: { input: 0.03, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.05 },
+	};
+	script = [
+		() => ({ ...failure(503), usage }),
+		() => ({ ...text("invalid verdict"), usage }),
+		() => ({ ...complete(), usage }),
+	];
+	const recorded: Parameters<NonNullable<ReviewRequest["recordUsage"]>>[0][] = [];
+	const result = await review(request({ recordUsage: sample => recorded.push(sample) }));
+	expect(result.kind).toBe("verdict");
+	expect(recorded.map(s => s.outcome)).toEqual(["error", "stop", "stop"]);
+	expect(recorded.map(s => s.meters?.totalTokens)).toEqual([6, 6, 6]);
+	expect(new Set(recorded.map(s => s.id)).size).toBe(3);
+});
