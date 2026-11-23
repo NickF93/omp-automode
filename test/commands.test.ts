@@ -7,6 +7,7 @@ describe("subcommand parsing", () => {
 		expect(parseSubcommand("")).toBe("show");
 		expect(parseSubcommand("  OFF ")).toBe("off");
 		expect(parseSubcommand("approve")).toBe("approve");
+		expect(parseSubcommand("usage --json")).toBe("usage");
 	});
 
 	test("unknown names and extra words are rejected with the usage, never guessed", () => {
@@ -16,7 +17,7 @@ describe("subcommand parsing", () => {
 
 	test("completion offers matching subcommands only for the first word", () => {
 		expect(completions("o")?.map(c => c.value)).toEqual(["on", "off"]);
-		expect(completions("")?.map(c => c.value)).toEqual(["show", "config", "on", "off", "approve", "save", "reload"]);
+		expect(completions("")?.map(c => c.value)).toEqual(["usage", "show", "config", "on", "off", "approve", "save", "reload"]);
 		expect(completions("x")).toBeNull();
 		expect(completions("off ")).toBeNull();
 	});

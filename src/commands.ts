@@ -28,7 +28,10 @@ import {
 } from "./settings";
 import { canonicalJson, type Control, type SessionState } from "./state";
 
+import { formatUsage, summarizeUsage } from "./usage";
+
 const SUBCOMMANDS = [
+	{ name: "usage", description: "Show session and reviewer usage (optionally --json)" },
 	{ name: "show", description: "Show whether review is on and the effective configuration (default)" },
 	{ name: "config", description: "Change this session's reviewer, timeout, rules or extra policy" },
 	{ name: "on", description: "Turn automatic review back on for this session" },
@@ -47,7 +50,7 @@ export function parseSubcommand(args: string): Subcommand | { error: string } {
 	const words = args.trim().split(/\s+/).filter(Boolean);
 	if (words.length === 0) return "show";
 	const match = SUBCOMMANDS.find(s => s.name === words[0]?.toLowerCase());
-	if (!match || words.length > 1) return { error: USAGE };
+	if (!match || (words.length > 1 && !(match.name === "usage" && words.length === 2 && words[1] === "--json"))) return { error: USAGE };
 	return match.name;
 }
 
@@ -451,6 +454,12 @@ export function registerCommands(pi: ExtensionAPI, { state, control, refresh, sh
 			return;
 		}
 		switch (subcommand) {
+			case "usage": {
+				const usage = summarizeUsage(ctx.sessionManager);
+				ctx.ui.notify(args.trim().split(/\s+/)[1] === "--json"
+					? JSON.stringify(usage) : formatUsage(usage), "info");
+				return;
+			}
 			case "show":
 				return showCommand(ctx);
 			case "config":
@@ -472,7 +481,7 @@ export function registerCommands(pi: ExtensionAPI, { state, control, refresh, sh
 	}
 
 	pi.registerCommand("auto-review", {
-		description: "Automatic review: show, config, on, off, approve, save",
+		description: "Automatic review: usage, show, config, on, off, approve, save",
 		getArgumentCompletions: completions,
 		handler: async (args, ctx) => autoReviewCommand(args, ctx),
 	});

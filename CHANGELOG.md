@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-11-23
+
+### Added
+
+- Record observed usage for each automatic review attempt by provider and model,
+  including reviews from linked local subagents. Usage survives session resume.
+- Add `/auto-review usage` and `/auto-review usage --json` for OMP's native
+  usage, AutoMode's usage, and the observed combined total. Report historical
+  and unmeasured attempts separately. Omit the combined total in forks with
+  copied reviewer history because the two counters inherit usage differently.
+
 ## [0.2.3] - 2026-11-14
 
 ### Fixed
@@ -146,7 +157,8 @@ run, so the agent can work without per-action approval prompts.
   the only check; choose a capable model.
 - Pinned to OMP 18.19.0 through imports of host internals.
 
-[Unreleased]: https://github.com/NickF93/omp-automode/compare/v0.2.3...develop
+[Unreleased]: https://github.com/NickF93/omp-automode/compare/v0.2.4...develop
+[0.2.4]: https://github.com/NickF93/omp-automode/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/NickF93/omp-automode/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/NickF93/omp-automode/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/NickF93/omp-automode/compare/v0.2.0...v0.2.1

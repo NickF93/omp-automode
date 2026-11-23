@@ -45,6 +45,8 @@ import {
 } from "./settings";
 import { type ActionKey, canonicalJson, type Control, ENTRY_VERSION, type ResultEntry, SessionState } from "./state";
 
+import { usageTarget, type UsageTarget } from "./usage";
+
 const STATUS_KEY = "omp-automode";
 
 // ---------------------------------------------------------------------------
@@ -55,6 +57,7 @@ const STATUS_KEY = "omp-automode";
 interface Lineage {
 	trusted: () => TrustedInstruction[];
 	control: () => Control;
+	usageTargets: (seen: Set<Lineage>) => UsageTarget[];
 }
 
 /**
@@ -104,6 +107,19 @@ export default function automode(pi: ExtensionAPI): void {
 	let deadlineSettings: Settings | undefined;
 	let agentId: string | undefined;
 	let lineage: Lineage | undefined;
+
+	const getUsageTargets = (ctx: ExtensionContext, seen = new Set<Lineage>()): UsageTarget[] => {
+		const owner = lineage;
+		if (owner && seen.has(owner)) return [];
+		if (owner) seen.add(owner);
+		const write = usageTarget(ctx.sessionManager, (type, data) => pi.appendEntry(type, data), () => {
+			pi.logger.warn("omp-automode: could not persist reviewer usage");
+		});
+		return [
+			sample => { if (owner === lineage) write(sample); },
+			...(parentLineage(ctx)?.usageTargets(seen) ?? []),
+		];
+	};
 
 	const captureOptions = (ctx: ExtensionContext, approvals: TrustedInstruction[]): CaptureOptions => ({
 		isChild: ctx.agent.kind === "sub",
@@ -188,6 +204,7 @@ export default function automode(pi: ExtensionAPI): void {
 		const sessionManager = ctx.sessionManager;
 		agentId = ctx.agent.id;
 		lineage = {
+			usageTargets: seen => getUsageTargets(ctx, seen),
 			trusted: () => captureEvidence(sessionManager.getBranch(), captureOptions(ctx, [])).trusted,
 			control: () => control(ctx),
 		};
@@ -205,6 +222,7 @@ export default function automode(pi: ExtensionAPI): void {
 		if (deadlineSettings && deadlineOwner) releaseHostDeadline(deadlineSettings, deadlineOwner);
 		deadlineSettings = undefined;
 		unregisterLineage();
+		lineage = undefined;
 	});
 
 	pi.on("before_agent_start", event => {
@@ -321,11 +339,13 @@ export default function automode(pi: ExtensionAPI): void {
 		const controller = new AbortController();
 		inflight.add(controller);
 		const runId = state.runId;
+		const usageTargets = getUsageTargets(ctx);
 		ctx.ui.setWorkingMessage("Automatic approval review…");
 		let result: ReviewResult;
 		try {
 			result = await review({
 				model: reviewer.model,
+				recordUsage: sample => { for (const target of usageTargets) target(sample); },
 				effort: reviewer.effort,
 				timeoutMs: settings.timeoutMs,
 				instructions,
@@ -357,6 +377,7 @@ export default function automode(pi: ExtensionAPI): void {
 				verdictContract: VERDICT_CONTRACT_VERSION,
 				instructionsSha256: createHash("sha256").update(instructions).digest("hex"),
 			},
+			usageAccounting: true,
 			...result.stats,
 		};
 		try {

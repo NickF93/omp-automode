@@ -59,6 +59,7 @@ export interface ResultEntry {
 	attempts: number;
 	checkpointRestarts: number;
 	samplingRequests: number;
+	usageAccounting?: true;
 	elapsedMs: number;
 }
 

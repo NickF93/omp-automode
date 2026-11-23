@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [develop]
+    types: [opened, reopened, synchronize, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omp-automode-ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate (Bun)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.4'
+          no-cache: true
+
+      - name: Install bubblewrap
+        run: |
+          ubuntu_sources="$RUNNER_TEMP/omp-automode-ubuntu.sources"
+          cat > "$ubuntu_sources" <<'SOURCES'
+          Types: deb
+          URIs: https://mirrors.edge.kernel.org/ubuntu/
+          Suites: noble noble-updates noble-security
+          Components: main
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          SOURCES
+          apt_options=(
+            -o "Dir::Etc::sourcelist=$ubuntu_sources"
+            -o Dir::Etc::sourceparts=-
+            -o Acquire::Languages=none
+            -o Acquire::https::Timeout=15
+          )
+          sudo apt-get "${apt_options[@]}" update --error-on=any
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends bubblewrap
+
+          if [[ $(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true) == 1 ]] &&
+             ! bwrap --unshare-user --unshare-net --ro-bind / / -- /usr/bin/true; then
+            sudo apparmor_parser --replace --skip-cache <<'APPARMOR'
+          abi <abi/4.0>,
+          include <tunables/global>
+
+          profile omp-automode-ci-bwrap /usr/bin/bwrap flags=(unconfined) {
+            userns,
+          }
+          APPARMOR
+          fi
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Check TypeScript
+        run: bun run check
+
+      - name: Run tests
+        run: bun run test
