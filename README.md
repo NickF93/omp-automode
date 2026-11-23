@@ -120,8 +120,19 @@ explain the risk and get your decision.
 
 ## Commands
 
-`/auto-review [show|config|on|off|approve|save|reload]`; Tab completes the subcommand.
+`/auto-review [usage|show|config|on|off|approve|save|reload]`; Tab completes the subcommand.
 
+- `usage`: show the observed session total, OMP's native usage and AutoMode's
+  share by provider and model. Includes reviewer calls from local subagents
+  linked to this session. Add `--json` for structured counters. USD is OMP's
+  estimate, separate from subscription quotas and provider credits. Recorded
+  usage survives resume and branch navigation. Older reviews and calls without
+  usable provider data appear as unmeasured. Completion errors without an
+  observable response are listed separately. In a fork that copies reviewer
+  history, AutoMode reports only the new session's reviews and omits the
+  combined total because OMP applies its own inheritance rules. On ordinary
+  sessions the combined total is shown here,
+  while OMP's built-in counters continue to report OMP's native usage.
 - `show` (also plain `/auto-review`): whether review is on, the reviewer model
   and effort, timeout, shell rules, extra policy, policy and template, each with
   where it comes from (session, project settings, user settings or default),
